@@ -64,3 +64,109 @@ model VerificationCode {
   @@index([email, consumedAt])
   @@index([email, createdAt])
 }
+
+/// A sellable product. Descriptive metadata only: pricing and entitlements live
+/// on its plans, so editing a product page never changes what a customer owns.
+model Product {
+  id          String   @id @default(cuid())
+  code        String   @unique @db.VarChar(64)
+  displayName String   @db.VarChar(120)
+  description String?  @db.Text
+  vendor      String?  @db.VarChar(120)
+  websiteUrl  String?  @db.VarChar(2048)
+  iconUrl     String?  @db.VarChar(2048)
+  /// String[] stored as JSON. Presentation only.
+  tags        Json?
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+  updatedAt   DateTime @updatedAt @db.DateTime(3)
+  plans       Plan[]
+
+  @@index([active, sortOrder])
+}
+
+/// A way of selling one product: the edition the customer is entitled to
+/// (`standard`, `pro`). The billing term is not part of its identity, so the
+/// same plan is sold monthly and yearly through its prices.
+model Plan {
+  id                  String   @id @default(cuid())
+  productId           String
+  product             Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  code                String   @db.VarChar(64)
+  displayName         String   @db.VarChar(120)
+  description         String?  @db.Text
+  /// Devices one paid seat may activate. A license snapshots this value.
+  maxActivations      Int      @default(1)
+  /// Free days this edition offers, independent of the term. 0 means no trial.
+  trialDays           Int      @default(0)
+  /// Activation limit of the trial variant; ignored when trialDays is 0.
+  trialMaxActivations Int      @default(1)
+  sortOrder           Int      @default(0)
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.DateTime(3)
+  updatedAt           DateTime @updatedAt @db.DateTime(3)
+  prices              PlanPrice[]
+  features            PlanFeature[]
+
+  @@unique([productId, code])
+  @@index([productId, active, sortOrder])
+}
+
+/// One billing term of a plan. The term is a commercial attribute of the
+/// purchase, never of the entitlement: switching from monthly to yearly keeps
+/// the same plan code.
+model PlanPrice {
+  id         String       @id @default(cuid())
+  planId     String
+  plan       Plan         @relation(fields: [planId], references: [id], onDelete: Cascade)
+  interval   PlanInterval
+  currency   String       @default("cny") @db.Char(3)
+  priceCents Int
+  createdAt  DateTime     @default(now()) @db.DateTime(3)
+  updatedAt  DateTime     @updatedAt @db.DateTime(3)
+
+  @@unique([planId, interval, currency])
+}
+
+enum PlanInterval {
+  MONTH
+  YEAR
+}
+
+/// A catalogue-wide capability that plans can grant, e.g. `ai-assistant`.
+/// `valueType` tells readers how to interpret the JSON value on PlanFeature.
+model Feature {
+  id          String           @id @default(cuid())
+  code        String           @unique @db.VarChar(64)
+  displayName String           @db.VarChar(120)
+  description String?          @db.Text
+  valueType   FeatureValueType @default(BOOLEAN)
+  /// Display hint for numeric values, e.g. `devices` or `projects`.
+  unit        String?          @db.VarChar(32)
+  createdAt   DateTime         @default(now()) @db.DateTime(3)
+  updatedAt   DateTime         @updatedAt @db.DateTime(3)
+  plans       PlanFeature[]
+}
+
+enum FeatureValueType {
+  BOOLEAN
+  NUMBER
+  TEXT
+}
+
+/// The value a plan grants for one feature; a missing row means "not
+/// included". The value's shape follows `Feature.valueType`.
+model PlanFeature {
+  id        String   @id @default(cuid())
+  planId    String
+  plan      Plan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  featureId String
+  feature   Feature  @relation(fields: [featureId], references: [id], onDelete: Restrict)
+  value     Json
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt @db.DateTime(3)
+
+  @@unique([planId, featureId])
+  @@index([featureId])
+}

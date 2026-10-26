@@ -32,6 +32,7 @@
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:test:deploy": "node scripts/prepare-test-db.mjs",
+    "db:seed": "node prisma/seed.mjs",
     "prebuild": "prisma generate",
     "postinstall": "prisma generate"
   },
