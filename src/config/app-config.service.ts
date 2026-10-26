@@ -75,4 +75,47 @@ export class AppConfig {
   get throttleLimit(): number {
     return this.value('THROTTLE_LIMIT');
   }
+
+  get jwtSecret(): string {
+    return this.value('JWT_SECRET');
+  }
+
+  get jwtIssuer(): string {
+    return this.value('JWT_ISSUER');
+  }
+
+  get jwtAudience(): string {
+    return this.value('JWT_AUDIENCE');
+  }
+
+  get jwtTtlSeconds(): number {
+    return this.value('JWT_TTL_SECONDS');
+  }
+
+  /** Key material for the verification-code HMAC, with a safe fallback. */
+  get verificationCodeSecret(): string {
+    return this.value('VERIFICATION_CODE_SECRET') ?? this.jwtSecret;
+  }
+
+  get mailTransport(): Env['MAIL_TRANSPORT'] {
+    return this.value('MAIL_TRANSPORT');
+  }
+
+  get smtp(): {
+    host: string;
+    port: number;
+    secure: boolean;
+    user: string;
+    password: string;
+    from: string;
+  } {
+    return {
+      host: this.value('SMTP_HOST'),
+      port: this.value('SMTP_PORT'),
+      secure: this.value('SMTP_SECURE'),
+      user: this.value('SMTP_USER'),
+      password: this.value('SMTP_PASSWORD'),
+      from: this.value('SMTP_FROM'),
+    };
+  }
 }

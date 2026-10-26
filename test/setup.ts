@@ -5,4 +5,6 @@ import 'reflect-metadata';
 process.env.NODE_ENV ??= 'test';
 process.env.DATABASE_URL ??=
   'mysql://entitlement:entitlement@localhost:3306/entitlement_test';
+process.env.JWT_SECRET ??= 'test-only-jwt-secret-with-32-characters';
+process.env.MAIL_TRANSPORT ??= 'log';
 process.env.LOG_LEVEL ??= 'silent';

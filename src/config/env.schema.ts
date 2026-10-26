@@ -50,25 +50,61 @@ export const envSchema = z
 
     THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
+
+    // Session tokens (JWT, HMAC/HS256). The secret must be at least 32 chars.
+    JWT_SECRET: z.string().min(32),
+    JWT_ISSUER: z.string().min(1).default('entitlement-api'),
+    JWT_AUDIENCE: z.string().min(1).default('entitlement-api'),
+    JWT_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+
+    // Key for the verification-code HMAC. Falls back to JWT_SECRET.
+    VERIFICATION_CODE_SECRET: z.string().min(32).optional(),
+
+    // `log` prints the code instead of sending mail: development and test only.
+    MAIL_TRANSPORT: z.enum(['log', 'smtp']).optional(),
+    SMTP_HOST: z.string().default(''),
+    SMTP_PORT: z.coerce.number().int().positive().default(587),
+    SMTP_SECURE: z.enum(['true', 'false']).default('false'),
+    SMTP_USER: z.string().default(''),
+    SMTP_PASSWORD: z.string().default(''),
+    SMTP_FROM: z
+      .string()
+      .min(1)
+      .default('Entitlement Portal <no-reply@example.com>'),
   })
   .superRefine((env, ctx) => {
-    if (env.NODE_ENV !== 'production') {
-      return;
-    }
-
+    const production = env.NODE_ENV === 'production';
     const origins = splitCsv(env.CORS_ORIGINS);
-    if (origins.length === 0) {
+
+    if (production && origins.length === 0) {
       ctx.addIssue({
         code: 'custom',
         path: ['CORS_ORIGINS'],
         message: 'CORS_ORIGINS must list at least one origin in production',
       });
     }
-    if (origins.includes('*')) {
+    if (production && origins.includes('*')) {
       ctx.addIssue({
         code: 'custom',
         path: ['CORS_ORIGINS'],
         message: 'CORS_ORIGINS must not contain the wildcard origin',
+      });
+    }
+
+    // A login code in the log stream would be a credential leak.
+    const transport = env.MAIL_TRANSPORT ?? (production ? 'smtp' : 'log');
+    if (production && transport !== 'smtp') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['MAIL_TRANSPORT'],
+        message: 'MAIL_TRANSPORT must be "smtp" in production',
+      });
+    }
+    if (transport === 'smtp' && env.SMTP_HOST.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SMTP_HOST'],
+        message: 'SMTP_HOST is required when MAIL_TRANSPORT is "smtp"',
       });
     }
   })
@@ -86,6 +122,11 @@ export const envSchema = z
       env.SWAGGER_ENABLED === undefined
         ? env.NODE_ENV !== 'production'
         : env.SWAGGER_ENABLED === 'true',
+    // Codes go to the log only outside production; production must use SMTP.
+    MAIL_TRANSPORT:
+      env.MAIL_TRANSPORT ??
+      (env.NODE_ENV === 'production' ? ('smtp' as const) : ('log' as const)),
+    SMTP_SECURE: env.SMTP_SECURE === 'true',
   }));
 
 export type Env = z.output<typeof envSchema>;

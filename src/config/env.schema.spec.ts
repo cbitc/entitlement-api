@@ -3,6 +3,13 @@ import { validateEnv } from './env.schema';
 
 const baseEnv = {
   DATABASE_URL: 'mysql://entitlement:entitlement@localhost:3306/entitlement',
+  JWT_SECRET: 'test-only-jwt-secret-with-32-characters',
+};
+
+const productionEnv = {
+  ...baseEnv,
+  NODE_ENV: 'production',
+  SMTP_HOST: 'smtp.example.com',
 };
 
 describe('validateEnv', () => {
@@ -35,8 +42,7 @@ describe('validateEnv', () => {
 
   it('ignores a pretty log format in production', () => {
     const env = validateEnv({
-      ...baseEnv,
-      NODE_ENV: 'production',
+      ...productionEnv,
       LOG_FORMAT: 'pretty',
       SWAGGER_ENABLED: 'true',
     });
@@ -46,7 +52,7 @@ describe('validateEnv', () => {
   });
 
   it('disables swagger in production by default', () => {
-    const env = validateEnv({ ...baseEnv, NODE_ENV: 'production' });
+    const env = validateEnv(productionEnv);
 
     expect(env.SWAGGER_ENABLED).toBe(false);
   });
@@ -64,10 +70,26 @@ describe('validateEnv', () => {
   it('rejects a wildcard origin in production', () => {
     expect(() =>
       validateEnv({
-        ...baseEnv,
-        NODE_ENV: 'production',
+        ...productionEnv,
         CORS_ORIGINS: '*',
       }),
     ).toThrow(/CORS_ORIGINS/);
+  });
+
+  it('defaults the mail transport by environment', () => {
+    expect(validateEnv(baseEnv).MAIL_TRANSPORT).toBe('log');
+    expect(validateEnv(productionEnv).MAIL_TRANSPORT).toBe('smtp');
+  });
+
+  it('refuses to print login codes in production', () => {
+    expect(() =>
+      validateEnv({ ...productionEnv, MAIL_TRANSPORT: 'log' }),
+    ).toThrow(/MAIL_TRANSPORT/);
+  });
+
+  it('requires SMTP_HOST when mail goes over SMTP', () => {
+    expect(() => validateEnv({ ...baseEnv, MAIL_TRANSPORT: 'smtp' })).toThrow(
+      /SMTP_HOST/,
+    );
   });
 });

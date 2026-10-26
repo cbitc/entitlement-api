@@ -13,3 +13,54 @@ datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")
 }
+
+/// Who an account belongs to: the email is the identity, and possession of it
+/// is proven by a verification code at login. The row is created on the first
+/// successful login, so `emailVerifiedAt` is always set from the start.
+///
+/// The role lives here rather than in deployment configuration so that
+/// administrator privileges are an auditable property of a real user.
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique @db.VarChar(254)
+  displayName     String?    @db.VarChar(120)
+  role            UserRole   @default(CUSTOMER)
+  status          UserStatus @default(ACTIVE)
+  emailVerifiedAt DateTime?  @db.DateTime(3)
+  lastLoginAt     DateTime?  @db.DateTime(3)
+  createdAt       DateTime   @default(now()) @db.DateTime(3)
+  updatedAt       DateTime   @updatedAt @db.DateTime(3)
+
+  @@index([status])
+}
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+/// DISABLED keeps the account and its history but refuses every login.
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// A short-lived login code sent to a mailbox.
+///
+/// Deliberately independent of `User`: the code proves control of the address
+/// before any account exists, so a first-time sign-in needs no user row yet.
+/// `codeHash` is an HMAC of the code and its recipient, never the code itself.
+/// Only the newest unconsumed row per address can be redeemed, and
+/// `attemptsRemaining` bounds guessing.
+model VerificationCode {
+  id                String    @id @default(cuid())
+  email             String    @db.VarChar(254)
+  codeHash          String    @db.VarChar(64)
+  expiresAt         DateTime  @db.DateTime(3)
+  attemptsRemaining Int       @default(5)
+  consumedAt        DateTime? @db.DateTime(3)
+  createdAt         DateTime  @default(now()) @db.DateTime(3)
+
+  @@index([email, consumedAt])
+  @@index([email, createdAt])
+}
