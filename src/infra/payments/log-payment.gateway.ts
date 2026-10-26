@@ -3,6 +3,7 @@ import type {
   PaymentInstruction,
   PaymentNotificationPayload,
   PaymentRequest,
+  ProviderPaymentStatus,
   RefundRequest,
   RefundResult,
 } from './payment-gateway';
@@ -54,5 +55,10 @@ export class LogPaymentGateway extends PaymentGateway {
 
   async refund(request: RefundRequest): Promise<RefundResult> {
     return { providerRefundNo: `MANUAL-${request.refundNumber}` };
+  }
+
+  /** The fake provider has no remote state to query. */
+  async queryPayment(): Promise<ProviderPaymentStatus> {
+    return { state: 'NOT_FOUND', providerStatus: 'LOG_GATEWAY' };
   }
 }

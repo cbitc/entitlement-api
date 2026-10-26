@@ -30,13 +30,17 @@ export class OrderFulfillmentService {
       include: VERSION_INCLUDE,
     });
 
+    // Start where the money arrived, not where reconciliation happened: a
+    // lost callback may be replayed minutes or hours later.
+    const startsAt = order.paidAt ?? now;
+
     const subscription = await tx.subscription.create({
       data: {
         userId: order.userId,
         productId: order.productId,
         status: 'ACTIVE',
         openKey: openKeyFor(order.userId, order.productId),
-        startedAt: now,
+        startedAt: startsAt,
       },
     });
 
@@ -52,8 +56,8 @@ export class OrderFulfillmentService {
         currency: order.currency,
         maxActivations: version.maxActivations,
       },
-      startsAt: now,
-      endsAt: addInterval(now, order.interval),
+      startsAt,
+      endsAt: addInterval(startsAt, order.interval),
     });
 
     await tx.order.update({

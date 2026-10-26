@@ -80,6 +80,19 @@ export class OrdersController {
     return this.orders.createPayment(current.id, params.id, body);
   }
 
+  @Post(':id/sync')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reconcile an order with the provider (for lost callbacks)',
+  })
+  @ApiOkResponse({ description: 'The order after reconciliation' })
+  sync(
+    @CurrentUser() current: AuthenticatedUser,
+    @ZodParam(orderParamsSchema) params: OrderParams,
+  ): Promise<OrderView> {
+    return this.orders.sync(current.id, params.id);
+  }
+
   @Post(':id/refunds')
   @Roles('ADMIN')
   @HttpCode(HttpStatus.OK)

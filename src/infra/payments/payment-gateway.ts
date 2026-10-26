@@ -46,6 +46,21 @@ export interface RefundResult {
   readonly providerRefundNo: string;
 }
 
+export type ProviderPaymentState =
+  'CAPTURED' | 'PENDING' | 'CLOSED' | 'NOT_FOUND';
+
+/** What the provider currently knows about a merchant order number. */
+export interface ProviderPaymentStatus {
+  readonly state: ProviderPaymentState;
+  /** Raw provider status, e.g. `TRADE_SUCCESS`, for logs and support. */
+  readonly providerStatus?: string;
+  readonly providerTradeNo?: string;
+  readonly amountCents?: number;
+  readonly currency?: string;
+  readonly paidAt?: Date;
+  readonly buyerId?: string;
+}
+
 /**
  * Outbound payment port.
  *
@@ -67,6 +82,14 @@ export abstract class PaymentGateway {
   abstract parseNotification(
     payload: Readonly<Record<string, string>>,
   ): PaymentNotificationPayload;
+
+  /**
+   * Active reconciliation: asks the provider about an order.
+   *
+   * Callbacks can be lost or unreachable (a local sandbox cannot be called
+   * back), so the money truth must be obtainable on demand, not only pushed.
+   */
+  abstract queryPayment(orderNumber: string): Promise<ProviderPaymentStatus>;
 
   abstract refund(request: RefundRequest): Promise<RefundResult>;
 }

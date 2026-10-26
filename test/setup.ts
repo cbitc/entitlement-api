@@ -8,3 +8,5 @@ process.env.DATABASE_URL ??=
 process.env.JWT_SECRET ??= 'test-only-jwt-secret-with-32-characters';
 process.env.MAIL_TRANSPORT ??= 'log';
 process.env.LOG_LEVEL ??= 'silent';
+// The local .env points at the Alipay sandbox; e2e must stay deterministic.
+process.env.PAYMENT_PROVIDER ??= 'log';

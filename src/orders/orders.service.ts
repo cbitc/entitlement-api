@@ -4,7 +4,10 @@ import { randomBytes } from 'node:crypto';
 import { AppException } from '../common/errors/app.exception';
 import { AppConfig } from '../config/app-config.service';
 import { PaymentGateway } from '../infra/payments/payment-gateway';
-import type { PaymentNotificationPayload } from '../infra/payments/payment-gateway';
+import type {
+  PaymentNotificationPayload,
+  ProviderPaymentStatus,
+} from '../infra/payments/payment-gateway';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import {
   SubscriptionPeriodsService,
@@ -773,6 +776,141 @@ export class OrdersService {
     return { closed };
   }
 
+  /**
+   * Owner-triggered reconciliation.
+   *
+   * Callbacks can be lost or unreachable (a local sandbox cannot be called
+   * back), so the provider is asked directly and the same capture path is used.
+   */
+  async sync(userId: string, id: string, now = new Date()): Promise<OrderView> {
+    const order = await this.prisma.order.findFirst({
+      where: { id, userId },
+      select: { id: true, number: true, status: true },
+    });
+    if (!order) {
+      throw AppException.notFound('Order not found', 'OrderNotFound');
+    }
+    if (order.status === 'FULFILLED' || order.status === 'REFUNDED') {
+      return this.loadView(order.id);
+    }
+    if (order.status === 'CLOSED') {
+      throw AppException.conflict(
+        'This order has already been closed',
+        'OrderClosed',
+      );
+    }
+
+    const status = await this.gateway.queryPayment(order.number);
+    if (status.state === 'NOT_FOUND') {
+      throw AppException.conflict(
+        'The provider has no record of this payment yet',
+        'PaymentNotConfirmed',
+      );
+    }
+    if (status.state === 'PENDING') {
+      throw AppException.conflict(
+        'The payment is still pending at the provider',
+        'PaymentPending',
+      );
+    }
+    if (status.state === 'CLOSED') {
+      throw AppException.conflict(
+        'The provider closed this payment',
+        'PaymentClosed',
+      );
+    }
+
+    const outcome = await this.prisma.$transaction((tx) =>
+      this.captureAndFulfill(
+        tx,
+        order.id,
+        this.providerPayload(order.number, status),
+        now,
+      ),
+    );
+    if (outcome.status === 'FAILED') {
+      throw outcome.reason === 'AMOUNT_MISMATCH'
+        ? AppException.unprocessable(
+            'The captured amount does not match the order',
+            'AmountMismatch',
+          )
+        : AppException.conflict(
+            'The payment could not be applied',
+            outcome.reason ?? 'PaymentNotApplied',
+          );
+    }
+
+    return this.loadView(order.id);
+  }
+
+  /**
+   * Cron-friendly sweep for checkouts whose callback never arrived.
+   * A captured payment is applied even if the callback is still in flight.
+   */
+  async syncPendingOrders(
+    now = new Date(),
+    limit = 100,
+  ): Promise<{ synced: number; pending: number; failed: number }> {
+    const rows = await this.prisma.order.findMany({
+      where: { status: 'PENDING' },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+      select: { id: true, number: true },
+    });
+
+    let synced = 0;
+    let pending = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      try {
+        const status = await this.gateway.queryPayment(row.number);
+        if (status.state !== 'CAPTURED') {
+          pending += 1;
+          continue;
+        }
+
+        const outcome = await this.prisma.$transaction((tx) =>
+          this.captureAndFulfill(
+            tx,
+            row.id,
+            this.providerPayload(row.number, status),
+            now,
+          ),
+        );
+        if (outcome.status === 'PROCESSED') {
+          synced += 1;
+        } else {
+          failed += 1;
+        }
+      } catch (error) {
+        failed += 1;
+        this.logger.warn(
+          `Payment sync failed for order ${row.number}: ${this.errorMessage(error)}`,
+        );
+      }
+    }
+
+    return { synced, pending, failed };
+  }
+
+  private providerPayload(
+    orderNumber: string,
+    status: ProviderPaymentStatus,
+  ): PaymentNotificationPayload {
+    return {
+      // Not a provider event id: reconciliation has no inbound event.
+      externalId: `SYNC-${orderNumber}`,
+      eventType: 'TRADE_SUCCESS',
+      orderNumber,
+      providerTradeNo: status.providerTradeNo,
+      amountCents: status.amountCents ?? 0,
+      currency: status.currency ?? 'cny',
+      paidAt: status.paidAt,
+      buyerId: status.buyerId,
+    };
+  }
+
   private async applyNotification(
     parsed: PaymentNotificationPayload,
     payload: Readonly<Record<string, string>>,
@@ -792,6 +930,7 @@ export class OrdersService {
 
         const order = await tx.order.findUnique({
           where: { number: parsed.orderNumber },
+          select: { id: true },
         });
         if (!order) {
           await this.finishNotification(
@@ -821,109 +960,14 @@ export class OrdersService {
           return true;
         }
 
-        if (
-          parsed.amountCents !== order.amountCents ||
-          parsed.currency.toLowerCase() !== order.currency.toLowerCase()
-        ) {
-          await this.finishNotification(
-            tx,
-            notification.id,
-            'FAILED',
-            'AMOUNT_MISMATCH',
-            order.id,
-          );
-          return true;
-        }
-
-        await tx.$queryRaw`
-          SELECT id FROM \`PaymentOrder\` WHERE id = ${order.id} FOR UPDATE
-        `;
-        const fresh = await tx.order.findUniqueOrThrow({
-          where: { id: order.id },
-        });
-
-        if (fresh.status === 'FULFILLED' || fresh.status === 'REFUNDED') {
-          await this.finishNotification(
-            tx,
-            notification.id,
-            'PROCESSED',
-            'ALREADY_FULFILLED',
-            fresh.id,
-          );
-          return true;
-        }
-        if (fresh.status === 'CLOSED') {
-          await this.finishNotification(
-            tx,
-            notification.id,
-            'FAILED',
-            'ORDER_CLOSED',
-            fresh.id,
-          );
-          return true;
-        }
-
-        const payment = await this.recordSuccess(tx, fresh, parsed, now);
-
-        await tx.order.update({
-          where: { id: fresh.id },
-          data: {
-            status: 'PAID',
-            paidAt: parsed.paidAt ?? now,
-            pendingKey: null,
-            failureReason: null,
-          },
-        });
-
-        const paidOrder = await tx.order.findUniqueOrThrow({
-          where: { id: fresh.id },
-        });
-
-        try {
-          if (paidOrder.kind === 'NEW_SUBSCRIPTION') {
-            await this.fulfillment.applyNewSubscription(tx, paidOrder, now);
-          } else {
-            const current = await tx.subscriptionPeriod.findFirst({
-              where: {
-                subscriptionId: paidOrder.subscriptionId ?? '',
-                status: 'ACTIVE',
-              },
-              select: { endsAt: true },
-            });
-            // Paying a renewal early only records the money; the boundary
-            // applies it, otherwise two periods would be ACTIVE at once.
-            if (current && current.endsAt <= now) {
-              await this.fulfillment.applyRenewal(tx, paidOrder, now);
-            }
-          }
-        } catch (error) {
-          if (error instanceof AppException) {
-            // The money is real; keep the order PAID and surface the reason
-            // for an operator instead of retrying the provider forever.
-            await tx.order.update({
-              where: { id: fresh.id },
-              data: { failureReason: error.type },
-            });
-            await this.finishNotification(
-              tx,
-              notification.id,
-              'FAILED',
-              error.type,
-              fresh.id,
-              payment.id,
-            );
-            return true;
-          }
-          throw error;
-        }
-
+        const outcome = await this.captureAndFulfill(tx, order.id, parsed, now);
         await this.finishNotification(
           tx,
           notification.id,
-          'PROCESSED',
-          null,
-          fresh.id,
-          payment.id,
+          outcome.status,
+          outcome.reason,
+          outcome.orderId,
+          outcome.paymentId,
         );
         return true;
       });
@@ -934,6 +978,106 @@ export class OrdersService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The single "money is in, apply it" path shared by the callback and sync.
+   *
+   * A business failure is recorded rather than thrown: the money is real, so
+   * the order stays PAID with a reason for an operator to refund or retry.
+   */
+  private async captureAndFulfill(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    parsed: PaymentNotificationPayload,
+    now: Date,
+  ): Promise<{
+    status: 'PROCESSED' | 'FAILED';
+    reason: string | null;
+    orderId: string;
+    paymentId?: string;
+  }> {
+    const order = await tx.order.findUnique({ where: { id: orderId } });
+    if (!order) {
+      return { status: 'FAILED', reason: 'ORDER_NOT_FOUND', orderId };
+    }
+
+    if (
+      parsed.amountCents !== order.amountCents ||
+      parsed.currency.toLowerCase() !== order.currency.toLowerCase()
+    ) {
+      return { status: 'FAILED', reason: 'AMOUNT_MISMATCH', orderId };
+    }
+
+    await tx.$queryRaw`
+      SELECT id FROM \`PaymentOrder\` WHERE id = ${order.id} FOR UPDATE
+    `;
+    const fresh = await tx.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+
+    if (fresh.status === 'FULFILLED' || fresh.status === 'REFUNDED') {
+      return { status: 'PROCESSED', reason: 'ALREADY_FULFILLED', orderId };
+    }
+    if (fresh.status === 'CLOSED') {
+      return { status: 'FAILED', reason: 'ORDER_CLOSED', orderId };
+    }
+
+    const payment = await this.recordSuccess(tx, fresh, parsed, now);
+
+    await tx.order.update({
+      where: { id: fresh.id },
+      data: {
+        status: 'PAID',
+        paidAt: parsed.paidAt ?? now,
+        pendingKey: null,
+        failureReason: null,
+      },
+    });
+
+    const paidOrder = await tx.order.findUniqueOrThrow({
+      where: { id: fresh.id },
+    });
+
+    try {
+      if (paidOrder.kind === 'NEW_SUBSCRIPTION') {
+        await this.fulfillment.applyNewSubscription(tx, paidOrder, now);
+      } else {
+        const current = await tx.subscriptionPeriod.findFirst({
+          where: {
+            subscriptionId: paidOrder.subscriptionId ?? '',
+            status: 'ACTIVE',
+          },
+          select: { endsAt: true },
+        });
+        // Paying a renewal early only records the money; the boundary applies
+        // it, otherwise two periods would be ACTIVE at once.
+        if (current && current.endsAt <= now) {
+          await this.fulfillment.applyRenewal(tx, paidOrder, now);
+        }
+      }
+    } catch (error) {
+      if (error instanceof AppException) {
+        await tx.order.update({
+          where: { id: fresh.id },
+          data: { failureReason: error.type },
+        });
+        return {
+          status: 'FAILED',
+          reason: error.type,
+          orderId: fresh.id,
+          paymentId: payment.id,
+        };
+      }
+      throw error;
+    }
+
+    return {
+      status: 'PROCESSED',
+      reason: null,
+      orderId: fresh.id,
+      paymentId: payment.id,
+    };
   }
 
   private async recordSuccess(

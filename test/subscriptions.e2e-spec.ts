@@ -376,6 +376,38 @@ describe('Subscriptions and payments (e2e)', () => {
     await createOrder(token, {}).expect(201);
   });
 
+  it('reconciles an unpaid order without granting anything', async () => {
+    await seedCatalogue();
+    const { token } = await signIn('buyer@example.com');
+
+    const created = await createOrder(token, {}).expect(201);
+
+    // The fake gateway has no record, so sync must not invent a payment.
+    const response = await http()
+      .post(`/orders/${created.body.id}/sync`)
+      .set(auth(token))
+      .expect(409);
+    expect(response.body.error.type).toBe('PaymentNotConfirmed');
+
+    const order = await getOrder(token, created.body.id).expect(200);
+    expect(order.body.status).toBe('PENDING');
+    expect(order.body.subscriptionId).toBeNull();
+  });
+
+  it('treats sync as a no-op when the order is already fulfilled', async () => {
+    await seedCatalogue();
+    const { token } = await signIn('buyer@example.com');
+
+    const order = await purchase(token);
+
+    const synced = await http()
+      .post(`/orders/${order.id}/sync`)
+      .set(auth(token))
+      .expect(200);
+    expect(synced.body.status).toBe('FULFILLED');
+    expect(synced.body.subscriptionId).toBe(order.subscriptionId);
+  });
+
   it('starts a trial once and converts it at the pinned price', async () => {
     const { standard } = await seedCatalogue();
     const { token } = await signIn('buyer@example.com');
