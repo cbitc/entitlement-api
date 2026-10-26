@@ -1,0 +1,15 @@
+// Prisma schema for the entitlement API.
+// Docs: https://pris.ly/d/prisma-schema
+//
+// The domain models (Product, Plan, Subscription, Order, License, ...) land in
+// the next step. This file only wires the MySQL datasource and the client
+// generator so migrations and `prisma generate` can run from day one.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
