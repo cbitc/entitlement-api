@@ -21,15 +21,18 @@ datasource db {
 /// The role lives here rather than in deployment configuration so that
 /// administrator privileges are an auditable property of a real user.
 model User {
-  id              String     @id @default(cuid())
-  email           String     @unique @db.VarChar(254)
-  displayName     String?    @db.VarChar(120)
-  role            UserRole   @default(CUSTOMER)
-  status          UserStatus @default(ACTIVE)
-  emailVerifiedAt DateTime?  @db.DateTime(3)
-  lastLoginAt     DateTime?  @db.DateTime(3)
-  createdAt       DateTime   @default(now()) @db.DateTime(3)
-  updatedAt       DateTime   @updatedAt @db.DateTime(3)
+  id               String               @id @default(cuid())
+  email            String               @unique @db.VarChar(254)
+  displayName      String?              @db.VarChar(120)
+  role             UserRole             @default(CUSTOMER)
+  status           UserStatus           @default(ACTIVE)
+  emailVerifiedAt  DateTime?            @db.DateTime(3)
+  lastLoginAt      DateTime?            @db.DateTime(3)
+  createdAt        DateTime             @default(now()) @db.DateTime(3)
+  updatedAt        DateTime             @updatedAt @db.DateTime(3)
+  subscriptions    Subscription[]
+  trialRedemptions TrialRedemption[]
+  requestedChanges SubscriptionChange[]
 
   @@index([status])
 }
@@ -68,65 +71,121 @@ model VerificationCode {
 /// A sellable product. Descriptive metadata only: pricing and entitlements live
 /// on its plans, so editing a product page never changes what a customer owns.
 model Product {
-  id          String   @id @default(cuid())
-  code        String   @unique @db.VarChar(64)
-  displayName String   @db.VarChar(120)
-  description String?  @db.Text
-  vendor      String?  @db.VarChar(120)
-  websiteUrl  String?  @db.VarChar(2048)
-  iconUrl     String?  @db.VarChar(2048)
+  id               String            @id @default(cuid())
+  code             String            @unique @db.VarChar(64)
+  displayName      String            @db.VarChar(120)
+  description      String?           @db.Text
+  vendor           String?           @db.VarChar(120)
+  websiteUrl       String?           @db.VarChar(2048)
+  iconUrl          String?           @db.VarChar(2048)
   /// String[] stored as JSON. Presentation only.
-  tags        Json?
-  sortOrder   Int      @default(0)
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now()) @db.DateTime(3)
-  updatedAt   DateTime @updatedAt @db.DateTime(3)
-  plans       Plan[]
+  tags             Json?
+  sortOrder        Int               @default(0)
+  active           Boolean           @default(true)
+  createdAt        DateTime          @default(now()) @db.DateTime(3)
+  updatedAt        DateTime          @updatedAt @db.DateTime(3)
+  plans            Plan[]
+  subscriptions    Subscription[]
+  trialRedemptions TrialRedemption[]
 
   @@index([active, sortOrder])
 }
 
 /// A way of selling one product: the edition the customer is entitled to
-/// (`standard`, `pro`). The billing term is not part of its identity, so the
-/// same plan is sold monthly and yearly through its prices.
+/// (`standard`, `pro`). Only identity and shop presentation live here. Price,
+/// billing terms, device limits and entitlements are content, and content
+/// belongs to an immutable `PlanVersion` — so editing this row can never change
+/// what an existing subscriber owns.
+///
+/// There is deliberately no `active` flag: whether an edition can still be
+/// bought is answered by "does it have a PUBLISHED version", one single source
+/// of truth instead of two switches that can disagree.
 model Plan {
-  id                  String   @id @default(cuid())
-  productId           String
-  product             Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  code                String   @db.VarChar(64)
-  displayName         String   @db.VarChar(120)
-  description         String?  @db.Text
-  /// Devices one paid seat may activate. A license snapshots this value.
-  maxActivations      Int      @default(1)
-  /// Free days this edition offers, independent of the term. 0 means no trial.
-  trialDays           Int      @default(0)
-  /// Activation limit of the trial variant; ignored when trialDays is 0.
-  trialMaxActivations Int      @default(1)
-  sortOrder           Int      @default(0)
-  active              Boolean  @default(true)
-  createdAt           DateTime @default(now()) @db.DateTime(3)
-  updatedAt           DateTime @updatedAt @db.DateTime(3)
-  prices              PlanPrice[]
-  features            PlanFeature[]
+  id          String        @id @default(cuid())
+  productId   String
+  product     Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  code        String        @db.VarChar(64)
+  displayName String        @db.VarChar(120)
+  description String?       @db.Text
+  sortOrder   Int           @default(0)
+  createdAt   DateTime      @default(now()) @db.DateTime(3)
+  updatedAt   DateTime      @updatedAt @db.DateTime(3)
+  versions    PlanVersion[]
 
   @@unique([productId, code])
-  @@index([productId, active, sortOrder])
+  @@index([productId, sortOrder])
 }
 
-/// One billing term of a plan. The term is a commercial attribute of the
-/// purchase, never of the entitlement: switching from monthly to yearly keeps
-/// the same plan code.
-model PlanPrice {
-  id         String       @id @default(cuid())
-  planId     String
-  plan       Plan         @relation(fields: [planId], references: [id], onDelete: Cascade)
-  interval   PlanInterval
-  currency   String       @default("cny") @db.Char(3)
-  priceCents Int
-  createdAt  DateTime     @default(now()) @db.DateTime(3)
-  updatedAt  DateTime     @updatedAt @db.DateTime(3)
+/// The state of a version decides who may start using it.
+///
+/// `PUBLISHED` is current: sold to new customers and renewed by existing ones.
+/// `CLOSED_FOR_SALE` is grandfathered: no new purchase, but subscribers already
+/// pinned to it keep renewing at their original terms. `RETIRED` stops both and
+/// is only referenced by history. Transitions are one-way.
+///
+/// A period, once created, keeps working whatever happens to the version: the
+/// only thing retirement stops is the *next* period.
+enum PlanVersionStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED_FOR_SALE
+  RETIRED
+}
 
-  @@unique([planId, interval, currency])
+/// An immutable snapshot of everything a customer is buying.
+///
+/// The freeze point is `DRAFT -> PUBLISHED`: after that, prices and feature
+/// values may not change, because some subscription may already be pinned to
+/// them or may pin to them at its next renewal. A commercial change is a new
+/// version, never an edit.
+///
+/// `publishedKey` carries the plan id while the version is PUBLISHED and NULL
+/// otherwise; its uniqueness (MySQL allows many NULLs) is how "at most one
+/// sellable version per plan" is enforced without partial indexes.
+model PlanVersion {
+  id                  String               @id @default(cuid())
+  planId              String
+  plan                Plan                 @relation(fields: [planId], references: [id], onDelete: Cascade)
+  /// Monotonic within the plan and never reused.
+  version             Int
+  status              PlanVersionStatus    @default(DRAFT)
+  publishedKey        String?              @unique @db.VarChar(191)
+  /// Devices one paid seat may activate. A period snapshots this value.
+  maxActivations      Int                  @default(1)
+  /// Free days this edition offers, independent of the term. 0 means no trial.
+  trialDays           Int                  @default(0)
+  /// Activation limit of the trial variant; ignored when trialDays is 0.
+  trialMaxActivations Int                  @default(1)
+  publishedAt         DateTime?            @db.DateTime(3)
+  /// Set when the version stops accepting new subscriptions but keeps renewing.
+  saleClosedAt        DateTime?            @db.DateTime(3)
+  retiredAt           DateTime?            @db.DateTime(3)
+  createdAt           DateTime             @default(now()) @db.DateTime(3)
+  updatedAt           DateTime             @updatedAt @db.DateTime(3)
+  prices              PlanVersionPrice[]
+  features            PlanVersionFeature[]
+  periods             SubscriptionPeriod[]
+  grants              EntitlementGrant[]
+  scheduledChanges    SubscriptionChange[]
+
+  @@unique([planId, version])
+  @@index([status])
+}
+
+/// One billing term of a version. The term is a commercial attribute of the
+/// purchase, never of the entitlement: switching from monthly to yearly keeps
+/// the same plan code and opens a new period.
+model PlanVersionPrice {
+  id            String       @id @default(cuid())
+  planVersionId String
+  planVersion   PlanVersion  @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  interval      PlanInterval
+  currency      String       @default("cny") @db.Char(3)
+  priceCents    Int
+  createdAt     DateTime     @default(now()) @db.DateTime(3)
+  updatedAt     DateTime     @updatedAt @db.DateTime(3)
+
+  @@unique([planVersionId, interval, currency])
 }
 
 enum PlanInterval {
@@ -135,18 +194,24 @@ enum PlanInterval {
 }
 
 /// A catalogue-wide capability that plans can grant, e.g. `ai-assistant`.
-/// `valueType` tells readers how to interpret the JSON value on PlanFeature.
+/// `valueType` tells readers how to interpret the JSON value on
+/// PlanVersionFeature. `consumable` marks a numeric capability whose value is a
+/// per-period allowance that a grant may meter (`ai.credits`); a missing row
+/// always means "not included".
 model Feature {
-  id          String           @id @default(cuid())
-  code        String           @unique @db.VarChar(64)
-  displayName String           @db.VarChar(120)
-  description String?          @db.Text
-  valueType   FeatureValueType @default(BOOLEAN)
+  id          String                 @id @default(cuid())
+  code        String                 @unique @db.VarChar(64)
+  displayName String                 @db.VarChar(120)
+  description String?                @db.Text
+  valueType   FeatureValueType       @default(BOOLEAN)
   /// Display hint for numeric values, e.g. `devices` or `projects`.
-  unit        String?          @db.VarChar(32)
-  createdAt   DateTime         @default(now()) @db.DateTime(3)
-  updatedAt   DateTime         @updatedAt @db.DateTime(3)
-  plans       PlanFeature[]
+  unit        String?                @db.VarChar(32)
+  /// TRUE only for NUMBER features that are an allowance rather than a limit.
+  consumable  Boolean                @default(false)
+  createdAt   DateTime               @default(now()) @db.DateTime(3)
+  updatedAt   DateTime               @updatedAt @db.DateTime(3)
+  versions    PlanVersionFeature[]
+  grantItems  EntitlementGrantItem[]
 }
 
 enum FeatureValueType {
@@ -155,18 +220,271 @@ enum FeatureValueType {
   TEXT
 }
 
-/// The value a plan grants for one feature; a missing row means "not
-/// included". The value's shape follows `Feature.valueType`.
-model PlanFeature {
-  id        String   @id @default(cuid())
-  planId    String
-  plan      Plan     @relation(fields: [planId], references: [id], onDelete: Cascade)
-  featureId String
-  feature   Feature  @relation(fields: [featureId], references: [id], onDelete: Restrict)
-  value     Json
-  createdAt DateTime @default(now()) @db.DateTime(3)
-  updatedAt DateTime @updatedAt @db.DateTime(3)
+/// The value a version grants for one feature; a missing row means "not
+/// included". The value's shape follows `Feature.valueType`. Rows are frozen
+/// together with their version.
+model PlanVersionFeature {
+  id            String      @id @default(cuid())
+  planVersionId String
+  planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  featureId     String
+  feature       Feature     @relation(fields: [featureId], references: [id], onDelete: Restrict)
+  value         Json
+  createdAt     DateTime    @default(now()) @db.DateTime(3)
+  updatedAt     DateTime    @updatedAt @db.DateTime(3)
 
-  @@unique([planId, featureId])
+  @@unique([planVersionId, featureId])
   @@index([featureId])
+}
+
+/// A user's contract with one product.
+///
+/// Deliberately carries no plan id: the plan is decided by the version pinned to
+/// each period, so "upgrade Standard -> Pro" is just the next period pinning a
+/// Pro version while the contract and its pricing history stay one row.
+///
+/// `openKey` holds `${userId}:${productId}` while the subscription is live and
+/// NULL once it is terminal; its uniqueness stops a user from holding two live
+/// subscriptions to the same product while still allowing a later resubscribe.
+model Subscription {
+  id               String               @id @default(cuid())
+  userId           String
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId        String
+  product          Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  status           SubscriptionStatus   @default(ACTIVE)
+  openKey          String?              @unique @db.VarChar(191)
+  startedAt        DateTime             @db.DateTime(3)
+  endedAt          DateTime?            @db.DateTime(3)
+  createdAt        DateTime             @default(now()) @db.DateTime(3)
+  updatedAt        DateTime             @updatedAt @db.DateTime(3)
+  periods          SubscriptionPeriod[]
+  changes          SubscriptionChange[]
+  grants           EntitlementGrant[]
+  trialRedemptions TrialRedemption[]
+
+  @@index([userId, status])
+  @@index([status])
+}
+
+/// `PAUSED` freezes entitlement and renewal but keeps the period clock running;
+/// it is not the same thing as "frozen terms", which is what a period is.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAUSED
+  CANCELED
+  EXPIRED
+}
+
+enum SubscriptionPeriodKind {
+  TRIAL
+  PAID
+}
+
+enum SubscriptionPeriodStatus {
+  ACTIVE
+  CLOSED
+}
+
+/// Why a period ended. `RENEWED` and `CHANGED` both continue the subscription
+/// with a fresh period; `CANCELED`, `PAUSED` and `EXPIRED` do not.
+enum SubscriptionPeriodCloseReason {
+  RENEWED
+  CHANGED
+  CANCELED
+  PAUSED
+  EXPIRED
+}
+
+/// One billing term — the unit that gets frozen.
+///
+/// Created in the same transaction that closes the previous one, so the pinned
+/// version, the commercial terms and the window are all decided at once and
+/// never edited afterwards. A period that ends early records that fact in
+/// `endedAt` instead of rewriting `endsAt`, which keeps the planned schedule
+/// auditable.
+///
+/// `currentKey` holds the subscription id while the period is ACTIVE and NULL
+/// otherwise, so "at most one running period per subscription" is a unique
+/// index rather than an application convention.
+model SubscriptionPeriod {
+  id             String                         @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription                   @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  /// Contiguous and monotonic within the subscription; identifies the term.
+  sequence       Int
+  planVersionId  String
+  planVersion    PlanVersion                    @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  kind           SubscriptionPeriodKind
+  status         SubscriptionPeriodStatus       @default(ACTIVE)
+  currentKey     String?                        @unique @db.VarChar(191)
+  /// Commercial terms, frozen at creation. All NULL for a TRIAL period.
+  interval       PlanInterval?
+  quantity       Int?
+  unitPriceCents Int?
+  currency       String?                        @db.Char(3)
+  /// Device limit in force for this period; a trial uses trialMaxActivations.
+  maxActivations Int
+  startsAt       DateTime                       @db.DateTime(3)
+  endsAt         DateTime                       @db.DateTime(3)
+  endedAt        DateTime?                      @db.DateTime(3)
+  closeReason    SubscriptionPeriodCloseReason?
+  createdAt      DateTime                       @default(now()) @db.DateTime(3)
+  updatedAt      DateTime                       @updatedAt @db.DateTime(3)
+  grant          EntitlementGrant?
+  appliedChanges SubscriptionChange[]           @relation("ChangeAppliedPeriod")
+
+  @@unique([subscriptionId, sequence])
+  @@index([subscriptionId, status])
+  @@index([planVersionId])
+}
+
+/// An intent to change the contract, recorded before it takes effect.
+///
+/// This is where the terms the customer agreed to are frozen: the target version
+/// and the target term are captured when the request is accepted, so a catalog
+/// edit between request and boundary cannot silently change the deal. At the
+/// boundary the intent is validated again and either applied, or marked FAILED
+/// — never silently replaced by something else.
+///
+/// `pendingKey` holds the subscription id while the change is PENDING and NULL
+/// otherwise, so one subscription can have at most one outstanding intent.
+model SubscriptionChange {
+  id                  String                   @id @default(cuid())
+  subscriptionId      String
+  subscription        Subscription             @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  kind                SubscriptionChangeKind
+  status              SubscriptionChangeStatus @default(PENDING)
+  targetPlanVersionId String?
+  targetPlanVersion   PlanVersion?             @relation(fields: [targetPlanVersionId], references: [id], onDelete: Restrict)
+  targetInterval      PlanInterval?
+  targetQuantity      Int?
+  /// When the intent becomes due. Change and cancel intents use the current
+  /// period end, which is the only moment they may take effect.
+  effectiveAt         DateTime                 @db.DateTime(3)
+  pendingKey          String?                  @unique @db.VarChar(191)
+  requestedByUserId   String?
+  requestedByUser     User?                    @relation(fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  requestedAt         DateTime                 @default(now()) @db.DateTime(3)
+  appliedAt           DateTime?                @db.DateTime(3)
+  appliedPeriodId     String?
+  appliedPeriod       SubscriptionPeriod?      @relation("ChangeAppliedPeriod", fields: [appliedPeriodId], references: [id], onDelete: SetNull)
+  failureReason       String?                  @db.VarChar(120)
+  createdAt           DateTime                 @default(now()) @db.DateTime(3)
+  updatedAt           DateTime                 @updatedAt @db.DateTime(3)
+
+  @@index([subscriptionId, status])
+  @@index([status, effectiveAt])
+  @@index([targetPlanVersionId])
+}
+
+enum SubscriptionChangeKind {
+  CHANGE
+  CANCEL
+  PAUSE
+  RESUME
+}
+
+enum SubscriptionChangeStatus {
+  PENDING
+  APPLIED
+  CANCELED
+  FAILED
+}
+
+/// A trial can be taken once per user and product for life, independently of how
+/// many times the subscription is started or canceled.
+model TrialRedemption {
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  subscriptionId  String?
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  firstRedeemedAt DateTime      @default(now()) @db.DateTime(3)
+
+  @@id([userId, productId])
+  @@index([productId])
+}
+
+/// The materialised entitlement of exactly one period.
+///
+/// Created from the pinned version inside the period transaction, and read by
+/// every authorisation check: the catalogue is never consulted at runtime, so
+/// publishing, closing or retiring a version cannot change a running period.
+///
+/// `activeKey` holds the subscription id while the grant is ACTIVE or SUSPENDED
+/// and NULL once it is closed, giving "at most one live grant per subscription".
+model EntitlementGrant {
+  id                   String                 @id @default(cuid())
+  subscriptionId       String
+  subscription         Subscription           @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionPeriodId String                 @unique
+  subscriptionPeriod   SubscriptionPeriod     @relation(fields: [subscriptionPeriodId], references: [id], onDelete: Cascade)
+  /// Kept for audit: which version this grant was materialised from.
+  planVersionId        String
+  planVersion          PlanVersion            @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  status               EntitlementGrantStatus @default(ACTIVE)
+  activeKey            String?                @unique @db.VarChar(191)
+  effectiveAt          DateTime               @db.DateTime(3)
+  expiresAt            DateTime               @db.DateTime(3)
+  closedAt             DateTime?              @db.DateTime(3)
+  createdAt            DateTime               @default(now()) @db.DateTime(3)
+  updatedAt            DateTime               @updatedAt @db.DateTime(3)
+  items                EntitlementGrantItem[]
+
+  @@index([subscriptionId, status])
+  @@index([planVersionId])
+}
+
+/// `SUSPENDED` mirrors a paused subscription (usage is kept, spending is not);
+/// `SUPERSEDED` means a mid-term change replaced it before its window closed.
+enum EntitlementGrantStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  SUPERSEDED
+  REVOKED
+}
+
+/// One frozen capability of a grant. `value`, `valueType` and `consumable` are
+/// copied from the pinned version so that later catalogue edits cannot alter
+/// what this period promised; `limit` and `used` exist only for consumables.
+model EntitlementGrantItem {
+  id         String             @id @default(cuid())
+  grantId    String
+  grant      EntitlementGrant   @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  featureId  String
+  feature    Feature            @relation(fields: [featureId], references: [id], onDelete: Restrict)
+  value      Json
+  valueType  FeatureValueType
+  consumable Boolean            @default(false)
+  /// Per-period allowance, snapshot of the version value; NULL if not metered.
+  limit      Int?
+  /// Cached sum of `EntitlementUsage`; must never exceed `limit`.
+  used       Int                @default(0)
+  createdAt  DateTime           @default(now()) @db.DateTime(3)
+  updatedAt  DateTime           @updatedAt @db.DateTime(3)
+  usages     EntitlementUsage[]
+
+  @@unique([grantId, featureId])
+  @@index([featureId])
+}
+
+/// Append-only spending log. `(grantItemId, requestId)` makes a retried call
+/// idempotent instead of double-charging the allowance. Usage is not exposed by
+/// the API yet, but the table lands with the model so grants never need a
+/// destructive migration to become metered.
+model EntitlementUsage {
+  id          String               @id @default(cuid())
+  grantItemId String
+  grantItem   EntitlementGrantItem @relation(fields: [grantItemId], references: [id], onDelete: Restrict)
+  requestId   String               @db.VarChar(128)
+  amount      Int
+  metadata    Json?
+  createdAt   DateTime             @default(now()) @db.DateTime(3)
+
+  @@unique([grantItemId, requestId])
+  @@index([grantItemId, createdAt])
 }

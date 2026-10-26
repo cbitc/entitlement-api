@@ -33,6 +33,9 @@ export default defineConfig({
           name: 'e2e',
           include: ['test/**/*.e2e-spec.ts'],
           testTimeout: 30_000,
+          // The suites share one MySQL database and each clears its tables in
+          // beforeEach, so they must never run concurrently.
+          fileParallelism: false,
         },
       },
     ],

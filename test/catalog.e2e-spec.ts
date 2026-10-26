@@ -34,14 +34,33 @@ describe('Catalog (e2e)', () => {
     });
 
   const createPrice = (
-    planId: string,
+    planVersionId: string,
     interval: PlanInterval,
     priceCents = 1000,
     currency = 'cny',
   ) =>
-    prisma.planPrice.create({
-      data: { planId, interval, priceCents, currency },
+    prisma.planVersionPrice.create({
+      data: { planVersionId, interval, priceCents, currency },
     });
+
+  const createVersion = (
+    planId: string,
+    version = 1,
+    data: Partial<
+      Omit<Prisma.PlanVersionUncheckedCreateInput, 'planId' | 'version'>
+    > = {},
+  ) => {
+    const status = data.status ?? 'PUBLISHED';
+    return prisma.planVersion.create({
+      data: {
+        planId,
+        version,
+        status,
+        publishedKey: status === 'PUBLISHED' ? planId : null,
+        ...data,
+      },
+    });
+  };
 
   const createFeature = (
     code: string,
@@ -59,9 +78,17 @@ describe('Catalog (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await prisma.planFeature.deleteMany();
+    await prisma.entitlementUsage.deleteMany();
+    await prisma.entitlementGrantItem.deleteMany();
+    await prisma.entitlementGrant.deleteMany();
+    await prisma.subscriptionChange.deleteMany();
+    await prisma.subscriptionPeriod.deleteMany();
+    await prisma.subscription.deleteMany();
+    await prisma.trialRedemption.deleteMany();
+    await prisma.planVersionFeature.deleteMany();
     await prisma.feature.deleteMany();
-    await prisma.planPrice.deleteMany();
+    await prisma.planVersionPrice.deleteMany();
+    await prisma.planVersion.deleteMany();
     await prisma.plan.deleteMany();
     await prisma.product.deleteMany();
   });
@@ -79,29 +106,31 @@ describe('Catalog (e2e)', () => {
     });
 
     const standard = await createPlan(alpha.id, 'standard', { sortOrder: 10 });
-    const pro = await createPlan(alpha.id, 'pro', {
-      sortOrder: 20,
+    const pro = await createPlan(alpha.id, 'pro', { sortOrder: 20 });
+    const standardV1 = await createVersion(standard.id);
+    const proV1 = await createVersion(pro.id, 1, {
       maxActivations: 3,
       trialDays: 14,
       trialMaxActivations: 2,
     });
-    await createPrice(standard.id, 'MONTH', 9900, 'usd');
-    await createPrice(standard.id, 'MONTH', 9900, 'cny');
-    await createPrice(pro.id, 'YEAR', 299_000);
-    await createPrice(pro.id, 'MONTH', 29_900);
+    await createPrice(standardV1.id, 'MONTH', 9900, 'usd');
+    await createPrice(standardV1.id, 'MONTH', 9900, 'cny');
+    await createPrice(proV1.id, 'YEAR', 299_000);
+    await createPrice(proV1.id, 'MONTH', 29_900);
 
     const ai = await createFeature('ai-assistant');
     const projects = await createFeature('max-projects', 'NUMBER');
     // Inserted out of order on purpose: the response sorts by feature code.
-    await prisma.planFeature.create({
-      data: { planId: pro.id, featureId: projects.id, value: 100 },
+    await prisma.planVersionFeature.create({
+      data: { planVersionId: proV1.id, featureId: projects.id, value: 100 },
     });
-    await prisma.planFeature.create({
-      data: { planId: pro.id, featureId: ai.id, value: true },
+    await prisma.planVersionFeature.create({
+      data: { planVersionId: proV1.id, featureId: ai.id, value: true },
     });
 
     const betaPlan = await createPlan(beta.id, 'standard');
-    await createPrice(betaPlan.id, 'MONTH', 500);
+    const betaV1 = await createVersion(betaPlan.id);
+    await createPrice(betaV1.id, 'MONTH', 500);
 
     const response = await getCatalog().expect(200);
 
@@ -122,6 +151,8 @@ describe('Catalog (e2e)', () => {
     ]);
 
     const standardBody = alphaBody.plans[0];
+    expect(standardBody.planVersionId).toBe(standardV1.id);
+    expect(standardBody.version).toBe(1);
     expect(standardBody.trial).toBeNull();
     expect(standardBody.maxActivations).toBe(1);
     expect(standardBody.prices).toEqual([
@@ -130,6 +161,8 @@ describe('Catalog (e2e)', () => {
     ]);
 
     const proBody = alphaBody.plans[1];
+    expect(proBody.planVersionId).toBe(proV1.id);
+    expect(proBody.version).toBe(1);
     expect(proBody.maxActivations).toBe(3);
     expect(proBody.trial).toEqual({ days: 14, maxActivations: 2 });
     expect(proBody.prices).toEqual([
@@ -142,7 +175,7 @@ describe('Catalog (e2e)', () => {
     ]);
   });
 
-  it('hides inactive products, inactive plans and plans without a price', async () => {
+  it('hides inactive products, plans without a sellable version and versions without a price', async () => {
     const inactiveProduct = await createProduct('inactive-product', {
       active: false,
     });
@@ -150,20 +183,24 @@ describe('Catalog (e2e)', () => {
       inactiveProduct.id,
       'standard',
     );
-    await createPrice(inactiveProductPlan.id, 'MONTH');
+    const inactiveProductVersion = await createVersion(inactiveProductPlan.id);
+    await createPrice(inactiveProductVersion.id, 'MONTH');
 
     const unpriced = await createProduct('unpriced');
     await createPlan(unpriced.id, 'standard');
 
-    const inactivePlan = await createProduct('inactive-plan');
-    const retired = await createPlan(inactivePlan.id, 'standard', {
-      active: false,
+    // A DRAFT version is not for sale, even when it has a price.
+    const drafted = await createProduct('draft-only');
+    const draftPlan = await createPlan(drafted.id, 'standard');
+    const draftVersion = await createVersion(draftPlan.id, 1, {
+      status: 'DRAFT',
     });
-    await createPrice(retired.id, 'MONTH');
+    await createPrice(draftVersion.id, 'MONTH');
 
     const priced = await createProduct('priced');
     const sellable = await createPlan(priced.id, 'standard');
-    await createPrice(sellable.id, 'MONTH');
+    const sellableVersion = await createVersion(sellable.id);
+    await createPrice(sellableVersion.id, 'MONTH');
 
     const response = await getCatalog().expect(200);
 
@@ -185,7 +222,8 @@ describe('Catalog (e2e)', () => {
   it('treats a product without tags as an empty list', async () => {
     const product = await createProduct('plain');
     const plan = await createPlan(product.id, 'standard');
-    await createPrice(plan.id, 'MONTH');
+    const version = await createVersion(plan.id);
+    await createPrice(version.id, 'MONTH');
 
     const response = await getCatalog().expect(200);
 

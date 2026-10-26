@@ -23,6 +23,9 @@ export interface CatalogPlan {
   readonly code: string;
   readonly displayName: string;
   readonly description: string | null;
+  /** The version these terms belong to; what a purchase would pin. */
+  readonly planVersionId: string;
+  readonly version: number;
   /** Devices one paid seat may activate. */
   readonly maxActivations: number;
   readonly trial: CatalogTrial | null;

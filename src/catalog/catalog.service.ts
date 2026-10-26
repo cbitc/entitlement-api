@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import type {
   CatalogPlan,
@@ -7,17 +7,26 @@ import type {
   CatalogResponse,
 } from './catalog.types';
 
+const VERSION_INCLUDE = Prisma.validator<Prisma.PlanVersionInclude>()({
+  prices: { orderBy: [{ interval: 'asc' }, { currency: 'asc' }] },
+  features: { include: { feature: true } },
+});
+
 type PlanRow = Prisma.PlanGetPayload<{
-  include: { prices: true; features: { include: { feature: true } } };
+  include: { versions: { include: typeof VERSION_INCLUDE } };
 }>;
 
 type ProductRow = Prisma.ProductGetPayload<{
   include: {
-    plans: {
-      include: { prices: true; features: { include: { feature: true } } };
-    };
+    plans: { include: { versions: { include: typeof VERSION_INCLUDE } } };
   };
 }>;
+
+/** The only version that is still being sold. */
+const SELLABLE_VERSION = {
+  status: 'PUBLISHED',
+  prices: { some: {} },
+} satisfies Prisma.PlanVersionWhereInput;
 
 /** `tags` is a JSON column; anything else is treated as "no tags". */
 const toStringArray = (value: Prisma.JsonValue | null): string[] =>
@@ -25,24 +34,38 @@ const toStringArray = (value: Prisma.JsonValue | null): string[] =>
     ? value.filter((item): item is string => typeof item === 'string')
     : [];
 
-const toCatalogPlan = (plan: PlanRow): CatalogPlan => ({
-  code: plan.code,
-  displayName: plan.displayName,
-  description: plan.description,
-  maxActivations: plan.maxActivations,
-  trial:
-    plan.trialDays > 0
-      ? { days: plan.trialDays, maxActivations: plan.trialMaxActivations }
-      : null,
-  prices: plan.prices.map((price) => ({
-    interval: price.interval,
-    priceCents: price.priceCents,
-    currency: price.currency,
-  })),
-  features: [...plan.features]
-    .sort((left, right) => left.feature.code.localeCompare(right.feature.code))
-    .map((link) => ({ code: link.feature.code, value: link.value })),
-});
+const toCatalogPlan = (plan: PlanRow): CatalogPlan | null => {
+  const version = plan.versions[0];
+  if (!version) {
+    return null;
+  }
+
+  return {
+    code: plan.code,
+    displayName: plan.displayName,
+    description: plan.description,
+    planVersionId: version.id,
+    version: version.version,
+    maxActivations: version.maxActivations,
+    trial:
+      version.trialDays > 0
+        ? {
+            days: version.trialDays,
+            maxActivations: version.trialMaxActivations,
+          }
+        : null,
+    prices: version.prices.map((price) => ({
+      interval: price.interval,
+      priceCents: price.priceCents,
+      currency: price.currency,
+    })),
+    features: [...version.features]
+      .sort((left, right) =>
+        left.feature.code.localeCompare(right.feature.code),
+      )
+      .map((link) => ({ code: link.feature.code, value: link.value })),
+  };
+};
 
 const toCatalogProduct = (product: ProductRow): CatalogProduct => ({
   code: product.code,
@@ -53,15 +76,18 @@ const toCatalogProduct = (product: ProductRow): CatalogProduct => ({
   iconUrl: product.iconUrl,
   tags: toStringArray(product.tags),
   sortOrder: product.sortOrder,
-  plans: product.plans.map(toCatalogPlan),
+  plans: product.plans
+    .map(toCatalogPlan)
+    .filter((plan): plan is CatalogPlan => plan !== null),
 });
 
 /**
  * Read model of the catalogue.
  *
  * Availability is decided here once: a product is listed only when it is
- * active and still offers an active plan that has at least one price. An
- * edition without a term cannot be bought, so it is not shown.
+ * active and still offers a plan with a PUBLISHED version that has at least one
+ * price. An edition without a sellable version cannot be bought, so it is not
+ * shown.
  */
 @Injectable()
 export class CatalogService {
@@ -71,16 +97,18 @@ export class CatalogService {
     const products = await this.prisma.product.findMany({
       where: {
         active: true,
-        plans: { some: { active: true, prices: { some: {} } } },
+        plans: { some: { versions: { some: SELLABLE_VERSION } } },
       },
       orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
       include: {
         plans: {
-          where: { active: true, prices: { some: {} } },
+          where: { versions: { some: SELLABLE_VERSION } },
           orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
           include: {
-            prices: { orderBy: [{ interval: 'asc' }, { currency: 'asc' }] },
-            features: { include: { feature: true } },
+            versions: {
+              where: { status: 'PUBLISHED' },
+              include: VERSION_INCLUDE,
+            },
           },
         },
       },

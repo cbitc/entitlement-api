@@ -23,6 +23,14 @@ const FEATURES = [
     valueType: 'NUMBER',
     unit: 'projects',
   },
+  {
+    code: 'ai-credits',
+    displayName: 'AI credits',
+    description: 'Monthly AI allowance consumed by completions and chat.',
+    valueType: 'NUMBER',
+    unit: 'credits',
+    consumable: true,
+  },
 ];
 
 const PRODUCTS = [
@@ -40,6 +48,7 @@ const PRODUCTS = [
         code: 'standard',
         displayName: 'Standard',
         description: 'Everything you need for JVM development.',
+        version: 1,
         maxActivations: 1,
         trialDays: 30,
         trialMaxActivations: 1,
@@ -54,6 +63,7 @@ const PRODUCTS = [
         code: 'pro',
         displayName: 'Pro',
         description: 'Standard plus AI assistance and more devices.',
+        version: 1,
         maxActivations: 3,
         trialDays: 30,
         trialMaxActivations: 1,
@@ -62,7 +72,11 @@ const PRODUCTS = [
           { interval: 'MONTH', currency: 'cny', priceCents: 29900 },
           { interval: 'YEAR', currency: 'cny', priceCents: 299000 },
         ],
-        features: { 'ai-assistant': true, 'max-projects': 100 },
+        features: {
+          'ai-assistant': true,
+          'max-projects': 100,
+          'ai-credits': 500,
+        },
       },
     ],
   },
@@ -78,8 +92,9 @@ const seedFeatures = async () => {
         description: feature.description,
         valueType: feature.valueType,
         unit: feature.unit,
+        consumable: feature.consumable ?? false,
       },
-      create: feature,
+      create: { consumable: false, ...feature },
     });
     byCode.set(feature.code, row);
   }
@@ -97,40 +112,58 @@ const seedProduct = async (product) => {
 };
 
 const seedPlan = async (productId, plan, featuresByCode) => {
-  const { prices, features, ...metadata } = plan;
+  const {
+    prices,
+    features,
+    version: planVersion,
+    maxActivations,
+    trialDays,
+    trialMaxActivations,
+    ...metadata
+  } = plan;
   const row = await prisma.plan.upsert({
     where: { productId_code: { productId, code: plan.code } },
-    update: { ...metadata, active: true },
+    update: metadata,
     create: { ...metadata, productId },
   });
 
-  for (const price of prices) {
-    await prisma.planPrice.upsert({
-      where: {
-        planId_interval_currency: {
-          planId: row.id,
-          interval: price.interval,
-          currency: price.currency,
-        },
-      },
-      update: { priceCents: price.priceCents },
-      create: { ...price, planId: row.id },
-    });
+  const existing = await prisma.planVersion.findUnique({
+    where: { planId_version: { planId: row.id, version: planVersion } },
+  });
+  // Published content is immutable: a demo change means bumping `version`.
+  if (existing) {
+    return;
   }
 
-  for (const [featureCode, value] of Object.entries(features)) {
-    const feature = featuresByCode.get(featureCode);
-    if (!feature) {
-      throw new Error(`Seed references unknown feature "${featureCode}"`);
-    }
-    await prisma.planFeature.upsert({
-      where: {
-        planId_featureId: { planId: row.id, featureId: feature.id },
+  const published = await prisma.planVersion.findFirst({
+    where: { planId: row.id, status: 'PUBLISHED' },
+    select: { id: true },
+  });
+
+  await prisma.planVersion.create({
+    data: {
+      planId: row.id,
+      version: planVersion,
+      status: published ? 'DRAFT' : 'PUBLISHED',
+      publishedKey: published ? null : row.id,
+      publishedAt: published ? null : new Date(),
+      maxActivations,
+      trialDays,
+      trialMaxActivations,
+      prices: {
+        create: prices.map((price) => ({ ...price })),
       },
-      update: { value },
-      create: { planId: row.id, featureId: feature.id, value },
-    });
-  }
+      features: {
+        create: Object.entries(features).map(([featureCode, value]) => {
+          const feature = featuresByCode.get(featureCode);
+          if (!feature) {
+            throw new Error(`Seed references unknown feature "${featureCode}"`);
+          }
+          return { featureId: feature.id, value };
+        }),
+      },
+    },
+  });
 };
 
 const main = async () => {

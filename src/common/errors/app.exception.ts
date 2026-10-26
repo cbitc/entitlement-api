@@ -40,6 +40,14 @@ export class AppException extends Error {
     return new AppException(type, HttpStatus.CONFLICT, message);
   }
 
+  /** A well-formed request whose commercial intent cannot be satisfied. */
+  static unprocessable(
+    message: string,
+    type = 'UnprocessableEntity',
+  ): AppException {
+    return new AppException(type, HttpStatus.UNPROCESSABLE_ENTITY, message);
+  }
+
   /** A resource that existed but is no longer available (e.g. an expired code). */
   static gone(message: string, type = 'Gone'): AppException {
     return new AppException(type, HttpStatus.GONE, message);
