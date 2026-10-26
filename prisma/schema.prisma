@@ -33,6 +33,8 @@ model User {
   subscriptions    Subscription[]
   trialRedemptions TrialRedemption[]
   requestedChanges SubscriptionChange[]
+  orders           Order[]
+  refunds          Refund[]
 
   @@index([status])
 }
@@ -87,6 +89,7 @@ model Product {
   plans            Plan[]
   subscriptions    Subscription[]
   trialRedemptions TrialRedemption[]
+  orders           Order[]
 
   @@index([active, sortOrder])
 }
@@ -167,6 +170,7 @@ model PlanVersion {
   periods             SubscriptionPeriod[]
   grants              EntitlementGrant[]
   scheduledChanges    SubscriptionChange[]
+  orders              Order[]
 
   @@unique([planId, version])
   @@index([status])
@@ -262,6 +266,7 @@ model Subscription {
   changes          SubscriptionChange[]
   grants           EntitlementGrant[]
   trialRedemptions TrialRedemption[]
+  orders           Order[]
 
   @@index([userId, status])
   @@index([status])
@@ -334,6 +339,8 @@ model SubscriptionPeriod {
   updatedAt      DateTime                       @updatedAt @db.DateTime(3)
   grant          EntitlementGrant?
   appliedChanges SubscriptionChange[]           @relation("ChangeAppliedPeriod")
+  sourceOrders   Order[]                        @relation("OrderSourcePeriod")
+  appliedOrder   Order?                         @relation("OrderAppliedPeriod")
 
   @@unique([subscriptionId, sequence])
   @@index([subscriptionId, status])
@@ -373,6 +380,7 @@ model SubscriptionChange {
   failureReason       String?                  @db.VarChar(120)
   createdAt           DateTime                 @default(now()) @db.DateTime(3)
   updatedAt           DateTime                 @updatedAt @db.DateTime(3)
+  order               Order?
 
   @@index([subscriptionId, status])
   @@index([status, effectiveAt])
@@ -487,4 +495,196 @@ model EntitlementUsage {
 
   @@unique([grantItemId, requestId])
   @@index([grantItemId, createdAt])
+}
+
+/// What a payment is buying. `NEW_SUBSCRIPTION` has no subscription yet — the
+/// row is created by fulfilment; `RENEWAL` and `TRIAL_CONVERSION` extend an
+/// existing one at its next boundary.
+enum OrderKind {
+  NEW_SUBSCRIPTION
+  RENEWAL
+  TRIAL_CONVERSION
+}
+
+/// `PAID` but not `FULFILLED` is a real state: money arrived and the order is
+/// waiting for the period boundary (a renewal paid early) or for a failed
+/// fulfilment to be retried. Money is never silently dropped.
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLED
+  CLOSED
+  REFUNDED
+}
+
+/// A commercial intent frozen before any money moves.
+///
+/// The price, the version and the term are captured here, so publishing a new
+/// plan version cannot change what an already-created order costs. Fulfilment
+/// is what turns `PAID` into a subscription period, and `appliedPeriodId`
+/// makes that transition happen at most once.
+///
+/// The table is named `PaymentOrder`: `Order` is a reserved word in MySQL and
+/// every raw lock query would otherwise need quoting by hand.
+model Order {
+  id              String                @id @default(cuid())
+  /// Human-readable, also used as the provider's `out_trade_no`.
+  number          String                @unique @db.VarChar(32)
+  userId          String
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  productId       String
+  product         Product               @relation(fields: [productId], references: [id], onDelete: Restrict)
+  /// Set by fulfilment for a new subscription; known up front for a renewal.
+  subscriptionId  String?
+  subscription    Subscription?         @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  kind            OrderKind
+  status          OrderStatus           @default(PENDING)
+  planVersionId   String
+  planVersion     PlanVersion           @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  /// Commercial terms, frozen at creation.
+  interval        PlanInterval
+  quantity        Int                   @default(1)
+  unitPriceCents  Int
+  currency        String                @db.Char(3)
+  amountCents     Int
+  /// `${userId}:${productId}` while the order is PENDING, so one product slot
+  /// cannot accumulate two unpaid checkouts.
+  pendingKey      String?               @unique @db.VarChar(191)
+  /// The period being renewed while the order is PENDING: one renewal order
+  /// per period.
+  renewalKey      String?               @unique @db.VarChar(191)
+  sourcePeriodId  String?
+  sourcePeriod    SubscriptionPeriod?   @relation("OrderSourcePeriod", fields: [sourcePeriodId], references: [id], onDelete: Restrict)
+  /// Frozen scheduled change this order pays for; applied together with the
+  /// period it creates.
+  changeId        String?               @unique
+  change          SubscriptionChange?   @relation(fields: [changeId], references: [id], onDelete: Restrict)
+  /// The period created when the order was fulfilled.
+  appliedPeriodId String?               @unique
+  appliedPeriod   SubscriptionPeriod?   @relation("OrderAppliedPeriod", fields: [appliedPeriodId], references: [id], onDelete: SetNull)
+  /// New order: checkout deadline. Renewal: the end of the period being bought,
+  /// because an unpaid renewal expires with that period.
+  expiresAt       DateTime              @db.DateTime(3)
+  paidAt          DateTime?             @db.DateTime(3)
+  fulfilledAt     DateTime?             @db.DateTime(3)
+  closedAt        DateTime?             @db.DateTime(3)
+  failureReason   String?               @db.VarChar(120)
+  createdAt       DateTime              @default(now()) @db.DateTime(3)
+  updatedAt       DateTime              @updatedAt @db.DateTime(3)
+  payments        Payment[]
+  refunds         Refund[]
+  notifications   PaymentNotification[]
+
+  @@index([userId, status])
+  @@index([status, expiresAt])
+  @@index([subscriptionId, status])
+  @@index([productId])
+  @@map("PaymentOrder")
+}
+
+/// `MANUAL` covers comped accounts and offline settlement; the provider is
+/// stored per attempt because a customer can retry with a different channel.
+enum PaymentProvider {
+  ALIPAY
+  MANUAL
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  CLOSED
+}
+
+/// One attempt to collect an order. `successKey` holds the order id only while
+/// SUCCEEDED, so the unique index enforces "at most one winning attempt".
+model Payment {
+  id              String                @id @default(cuid())
+  orderId         String
+  order           Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider        PaymentProvider
+  /// Provider-specific channel, e.g. `ALIPAY_PAGE`.
+  channel         String?               @db.VarChar(32)
+  status          PaymentStatus         @default(INITIATED)
+  amountCents     Int
+  currency        String                @db.Char(3)
+  /// Provider transaction id (Alipay `trade_no`), unique once known.
+  providerTradeNo String?               @db.VarChar(64)
+  successKey      String?               @unique @db.VarChar(191)
+  buyerId         String?               @db.VarChar(64)
+  failureCode     String?               @db.VarChar(64)
+  failureMessage  String?               @db.VarChar(255)
+  initiatedAt     DateTime              @default(now()) @db.DateTime(3)
+  paidAt          DateTime?             @db.DateTime(3)
+  closedAt        DateTime?             @db.DateTime(3)
+  createdAt       DateTime              @default(now()) @db.DateTime(3)
+  updatedAt       DateTime              @updatedAt @db.DateTime(3)
+  refunds         Refund[]
+  notifications   PaymentNotification[]
+
+  @@unique([provider, providerTradeNo])
+  @@index([orderId, status])
+}
+
+enum PaymentNotificationStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+/// Inbound provider callback, stored before it is acted on.
+///
+/// `(provider, externalId)` makes a replayed callback a no-op instead of a
+/// double fulfilment, and keeping the raw payload means a failed handler can
+/// be replayed offline.
+model PaymentNotification {
+  id           String                    @id @default(cuid())
+  provider     PaymentProvider
+  /// Provider event id (Alipay `notify_id`) or a digest when absent.
+  externalId   String                    @db.VarChar(128)
+  verified     Boolean                   @default(false)
+  eventType    String                    @db.VarChar(64)
+  orderId      String?
+  order        Order?                    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  paymentId    String?
+  payment      Payment?                  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  status       PaymentNotificationStatus @default(RECEIVED)
+  payload      Json
+  errorMessage String?                   @db.VarChar(255)
+  receivedAt   DateTime                  @default(now()) @db.DateTime(3)
+  processedAt  DateTime?                 @db.DateTime(3)
+  createdAt    DateTime                  @default(now()) @db.DateTime(3)
+
+  @@unique([provider, externalId])
+  @@index([status, receivedAt])
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+/// A refund never exceeds what was collected: the service adds up SUCCEEDED and
+/// PENDING rows before creating the next one.
+model Refund {
+  id                String       @id @default(cuid())
+  orderId           String
+  order             Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentId         String
+  payment           Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  amountCents       Int
+  currency          String       @db.Char(3)
+  reason            String       @db.VarChar(255)
+  status            RefundStatus @default(PENDING)
+  providerRefundNo  String?      @unique @db.VarChar(64)
+  requestedByUserId String?
+  requestedByUser   User?        @relation(fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  requestedAt       DateTime     @default(now()) @db.DateTime(3)
+  completedAt       DateTime?    @db.DateTime(3)
+  failureReason     String?      @db.VarChar(120)
+
+  @@index([orderId, status])
 }

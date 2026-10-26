@@ -78,6 +78,10 @@ describe('Catalog (e2e)', () => {
   });
 
   beforeEach(async () => {
+    await prisma.refund.deleteMany();
+    await prisma.paymentNotification.deleteMany();
+    await prisma.payment.deleteMany();
+    await prisma.order.deleteMany();
     await prisma.entitlementUsage.deleteMany();
     await prisma.entitlementGrantItem.deleteMany();
     await prisma.entitlementGrant.deleteMany();

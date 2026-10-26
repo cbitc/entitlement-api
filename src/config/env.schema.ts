@@ -71,6 +71,31 @@ export const envSchema = z
       .string()
       .min(1)
       .default('Entitlement Portal <no-reply@example.com>'),
+
+    // `log` fabricates a checkout URL and accepts unsigned callbacks: dev and
+    // test only. Production must talk to a real provider.
+    PAYMENT_PROVIDER: z.enum(['log', 'alipay']).optional(),
+    /** How long an unpaid checkout stays valid. */
+    ORDER_TTL_MINUTES: z.coerce.number().int().positive().max(1440).default(30),
+    /** How early a renewal order is created before the period ends. */
+    RENEWAL_LEAD_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+    ALIPAY_APP_ID: z.string().default(''),
+    /** PKCS#8 private key, raw base64 or full PEM. */
+    ALIPAY_PRIVATE_KEY: z.string().default(''),
+    /** Alipay public key used to verify callbacks, raw base64 or full PEM. */
+    ALIPAY_PUBLIC_KEY: z.string().default(''),
+    ALIPAY_GATEWAY_URL: z
+      .string()
+      .url()
+      .default('https://openapi.alipay.com/gateway.do'),
+    PAYMENT_NOTIFY_URL: z
+      .string()
+      .url()
+      .default('http://localhost:3000/payments/alipay/notify'),
+    PAYMENT_RETURN_URL: z
+      .string()
+      .url()
+      .default('http://localhost:5173/checkout/return'),
   })
   .superRefine((env, ctx) => {
     const production = env.NODE_ENV === 'production';
@@ -107,6 +132,31 @@ export const envSchema = z
         message: 'SMTP_HOST is required when MAIL_TRANSPORT is "smtp"',
       });
     }
+
+    // A fabricated checkout is unacceptable once real money is involved.
+    const payments = env.PAYMENT_PROVIDER ?? (production ? 'alipay' : 'log');
+    if (production && payments !== 'alipay') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PAYMENT_PROVIDER'],
+        message: 'PAYMENT_PROVIDER must be "alipay" in production',
+      });
+    }
+    if (payments === 'alipay') {
+      for (const key of [
+        'ALIPAY_APP_ID',
+        'ALIPAY_PRIVATE_KEY',
+        'ALIPAY_PUBLIC_KEY',
+      ] as const) {
+        if (env[key].length === 0) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: `${key} is required when PAYMENT_PROVIDER is "alipay"`,
+          });
+        }
+      }
+    }
   })
   .transform((env) => ({
     ...env,
@@ -127,6 +177,10 @@ export const envSchema = z
       env.MAIL_TRANSPORT ??
       (env.NODE_ENV === 'production' ? ('smtp' as const) : ('log' as const)),
     SMTP_SECURE: env.SMTP_SECURE === 'true',
+    // Outside production the fake provider keeps the checkout flow runnable.
+    PAYMENT_PROVIDER:
+      env.PAYMENT_PROVIDER ??
+      (env.NODE_ENV === 'production' ? ('alipay' as const) : ('log' as const)),
   }));
 
 export type Env = z.output<typeof envSchema>;

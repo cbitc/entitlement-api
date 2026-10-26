@@ -1,14 +1,19 @@
-import { Injectable, Logger } from '@nestjs/common';
-import {
-  Prisma,
-  type EntitlementGrantStatus,
-  type PlanInterval,
-  type SubscriptionPeriodCloseReason,
-  type SubscriptionPeriodKind,
-} from '@prisma/client';
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { addDays, addInterval } from './period-math';
+import {
+  PERIOD_INCLUDE,
+  SubscriptionPeriodsService,
+  VERSION_INCLUDE,
+  isRenewable,
+  openKeyFor,
+  priceFor,
+  type PeriodRow,
+  type PeriodTerms,
+  type VersionRow,
+} from './subscription-periods.service';
 import type {
   ChangeSubscriptionInput,
   CreateSubscriptionInput,
@@ -21,30 +26,6 @@ import type {
   SubscriptionRenewalView,
   SubscriptionView,
 } from './subscriptions.types';
-
-const VERSION_INCLUDE = Prisma.validator<Prisma.PlanVersionInclude>()({
-  prices: true,
-  plan: { select: { id: true, code: true } },
-  features: { include: { feature: true } },
-});
-
-const PERIOD_INCLUDE = Prisma.validator<Prisma.SubscriptionPeriodInclude>()({
-  planVersion: { include: VERSION_INCLUDE },
-  grant: {
-    select: {
-      id: true,
-      status: true,
-      items: {
-        select: {
-          value: true,
-          limit: true,
-          used: true,
-          feature: { select: { code: true } },
-        },
-      },
-    },
-  },
-});
 
 const VIEW_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
   product: { select: { code: true } },
@@ -68,45 +49,12 @@ const VIEW_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
   },
 });
 
-type Db = Prisma.TransactionClient;
-type VersionRow = Prisma.PlanVersionGetPayload<{
-  include: typeof VERSION_INCLUDE;
-}>;
-type PeriodRow = Prisma.SubscriptionPeriodGetPayload<{
-  include: typeof PERIOD_INCLUDE;
-}>;
 type ViewRow = Prisma.SubscriptionGetPayload<{ include: typeof VIEW_INCLUDE }>;
-
-interface PeriodTerms {
-  readonly interval: PlanInterval;
-  readonly quantity: number;
-  readonly unitPriceCents: number;
-  readonly currency: string;
-  readonly maxActivations: number;
-}
-
-interface CreatePeriodParams {
-  readonly subscriptionId: string;
-  readonly sequence: number;
-  readonly version: VersionRow;
-  readonly kind: SubscriptionPeriodKind;
-  readonly terms: PeriodTerms;
-  readonly startsAt: Date;
-  readonly endsAt: Date;
-}
 
 interface TargetTerms {
   readonly version: VersionRow;
   readonly terms: PeriodTerms;
 }
-
-/** CLOSED_FOR_SALE still renews; only RETIRED stops the next period. */
-const isRenewable = (status: string): boolean =>
-  status === 'PUBLISHED' || status === 'CLOSED_FOR_SALE';
-
-/** Only a live subscription may hold the user × product slot. */
-const openKeyFor = (userId: string, productId: string): string =>
-  `${userId}:${productId}`;
 
 const toPeriodView = (period: PeriodRow): SubscriptionPeriodView => ({
   id: period.id,
@@ -186,9 +134,10 @@ const toEntitlements = (
 
 @Injectable()
 export class SubscriptionsService {
-  private readonly logger = new Logger(SubscriptionsService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly periods: SubscriptionPeriodsService,
+  ) {}
 
   async listForUser(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.prisma.subscription.findMany({
@@ -215,6 +164,10 @@ export class SubscriptionsService {
     return this.loadView(this.prisma, id);
   }
 
+  /**
+   * Starts a trial. Paid purchases go through the orders module: a paid
+   * subscription must not exist before the money does.
+   */
   async create(
     userId: string,
     input: CreateSubscriptionInput,
@@ -252,7 +205,7 @@ export class SubscriptionsService {
       );
     }
 
-    const price = this.priceFor(version, input.interval, input.currency);
+    const price = priceFor(version, input.interval, input.currency);
     if (!price) {
       throw AppException.unprocessable(
         `This plan is not sold as ${input.interval} in ${input.currency}`,
@@ -260,7 +213,7 @@ export class SubscriptionsService {
       );
     }
 
-    if (input.trial && version.trialDays <= 0) {
+    if (version.trialDays <= 0) {
       throw AppException.conflict(
         'This plan does not offer a trial',
         'TrialNotAvailable',
@@ -269,59 +222,51 @@ export class SubscriptionsService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        if (input.trial) {
-          const redeemed = await tx.trialRedemption.findUnique({
-            where: { userId_productId: { userId, productId: product.id } },
-            select: { userId: true },
-          });
-          if (redeemed) {
-            throw AppException.conflict(
-              'The trial has already been used for this product',
-              'TrialAlreadyUsed',
-            );
-          }
+        const redeemed = await tx.trialRedemption.findUnique({
+          where: { userId_productId: { userId, productId: product.id } },
+          select: { userId: true },
+        });
+        if (redeemed) {
+          throw AppException.conflict(
+            'The trial has already been used for this product',
+            'TrialAlreadyUsed',
+          );
         }
 
         const subscription = await tx.subscription.create({
           data: {
             userId,
             productId: product.id,
-            status: input.trial ? 'TRIALING' : 'ACTIVE',
+            status: 'TRIALING',
             openKey: openKeyFor(userId, product.id),
             startedAt: now,
           },
         });
 
-        if (input.trial) {
-          await tx.trialRedemption.create({
-            data: {
-              userId,
-              productId: product.id,
-              subscriptionId: subscription.id,
-              firstRedeemedAt: now,
-            },
-          });
-        }
+        await tx.trialRedemption.create({
+          data: {
+            userId,
+            productId: product.id,
+            subscriptionId: subscription.id,
+            firstRedeemedAt: now,
+          },
+        });
 
-        await this.createPeriodWithGrant(tx, {
+        await this.periods.createWithGrant(tx, {
           subscriptionId: subscription.id,
           sequence: 1,
           version,
-          kind: input.trial ? 'TRIAL' : 'PAID',
+          kind: 'TRIAL',
           terms: {
             interval: input.interval,
             quantity: input.quantity,
             unitPriceCents: price.priceCents,
             currency: price.currency,
             // The trial locks the price it will convert at, not just its seats.
-            maxActivations: input.trial
-              ? version.trialMaxActivations
-              : version.maxActivations,
+            maxActivations: version.trialMaxActivations,
           },
           startsAt: now,
-          endsAt: input.trial
-            ? addDays(now, version.trialDays)
-            : addInterval(now, input.interval),
+          endsAt: addDays(now, version.trialDays),
         });
 
         return this.loadView(tx, subscription.id);
@@ -352,7 +297,7 @@ export class SubscriptionsService {
         );
       }
 
-      const period = await this.currentPeriod(tx, id);
+      const period = await this.periods.current(tx, id);
       if (!period) {
         throw AppException.conflict(
           'The subscription has no running period',
@@ -361,6 +306,9 @@ export class SubscriptionsService {
       }
 
       await this.ensureNoPendingChange(tx, id);
+      await this.assertNoPaidRenewal(tx, id);
+      // An unpaid renewal order priced the old terms; the job recreates it.
+      await this.closePendingOrders(tx, id);
       const target = await this.resolveTarget(
         tx,
         subscription.productId,
@@ -405,6 +353,9 @@ export class SubscriptionsService {
         );
       }
 
+      await this.assertNoPaidRenewal(tx, id);
+      await this.closePendingOrders(tx, id);
+
       await tx.subscriptionChange.update({
         where: { id: changeId },
         data: { status: 'CANCELED', pendingKey: null },
@@ -434,7 +385,7 @@ export class SubscriptionsService {
       }
 
       await this.ensureNoPendingChange(tx, id);
-      const period = await this.currentPeriod(tx, id);
+      const period = await this.periods.current(tx, id);
       if (!period) {
         throw AppException.conflict(
           'The subscription has no running period',
@@ -492,7 +443,7 @@ export class SubscriptionsService {
         });
       } else {
         if (last.status === 'ACTIVE') {
-          await this.closePeriod(tx, last, {
+          await this.periods.close(tx, last, {
             endedAt: last.endsAt,
             closeReason: 'PAUSED',
             grantStatus: 'EXPIRED',
@@ -513,7 +464,7 @@ export class SubscriptionsService {
           );
         }
         const currency = last.currency ?? 'cny';
-        const price = this.priceFor(last.planVersion, interval, currency);
+        const price = priceFor(last.planVersion, interval, currency);
         if (!price) {
           throw AppException.unprocessable(
             `This plan is not sold as ${interval} in ${currency}`,
@@ -521,7 +472,7 @@ export class SubscriptionsService {
           );
         }
 
-        await this.createPeriodWithGrant(tx, {
+        await this.periods.createWithGrant(tx, {
           subscriptionId: id,
           sequence: last.sequence + 1,
           version: last.planVersion,
@@ -564,6 +515,9 @@ export class SubscriptionsService {
         );
       }
 
+      await this.assertNoPaidRenewal(tx, id);
+      await this.closePendingOrders(tx, id);
+
       const last = await tx.subscriptionPeriod.findFirst({
         where: { subscriptionId: id },
         orderBy: { sequence: 'desc' },
@@ -586,7 +540,7 @@ export class SubscriptionsService {
       }
 
       if (last?.status === 'ACTIVE') {
-        await this.closePeriod(tx, last, {
+        await this.periods.close(tx, last, {
           endedAt: now,
           closeReason: 'CANCELED',
           grantStatus: 'EXPIRED',
@@ -603,273 +557,8 @@ export class SubscriptionsService {
     });
   }
 
-  /**
-   * Renewal driver. Returns counts instead of throwing so one bad subscription
-   * cannot stop the batch; the caller (a cron job) decides how to alarm.
-   */
-  async renewDueSubscriptions(
-    now = new Date(),
-    limit = 200,
-  ): Promise<{ renewed: number; failed: number }> {
-    const due = await this.prisma.subscription.findMany({
-      where: {
-        status: { in: ['TRIALING', 'ACTIVE'] },
-        periods: { some: { status: 'ACTIVE', endsAt: { lte: now } } },
-      },
-      select: { id: true },
-      take: limit,
-    });
-
-    let renewed = 0;
-    let failed = 0;
-
-    for (const row of due) {
-      try {
-        if (await this.renewOne(row.id, now)) {
-          renewed += 1;
-        }
-      } catch (error) {
-        failed += 1;
-        this.logger.error(`Renewal failed for subscription ${row.id}`, error);
-      }
-    }
-
-    return { renewed, failed };
-  }
-
-  private async renewOne(id: string, now: Date): Promise<boolean> {
-    return this.prisma.$transaction(async (tx) => {
-      const subscription = await tx.subscription.findUnique({
-        where: { id },
-      });
-      if (
-        !subscription ||
-        (subscription.status !== 'TRIALING' && subscription.status !== 'ACTIVE')
-      ) {
-        return false;
-      }
-
-      const period = await this.currentPeriod(tx, id);
-      if (!period || period.endsAt > now) {
-        return false;
-      }
-
-      const pending = await tx.subscriptionChange.findFirst({
-        where: {
-          subscriptionId: id,
-          status: 'PENDING',
-          effectiveAt: { lte: now },
-        },
-        include: { targetPlanVersion: { include: VERSION_INCLUDE } },
-      });
-
-      if (pending?.kind === 'CANCEL') {
-        await this.closePeriod(tx, period, {
-          endedAt: period.endsAt,
-          closeReason: 'CANCELED',
-          grantStatus: 'EXPIRED',
-        });
-        await tx.subscriptionChange.update({
-          where: { id: pending.id },
-          data: {
-            status: 'APPLIED',
-            pendingKey: null,
-            appliedAt: period.endsAt,
-          },
-        });
-        await tx.subscription.update({
-          where: { id },
-          data: {
-            status: 'CANCELED',
-            endedAt: period.endsAt,
-            openKey: null,
-          },
-        });
-        return true;
-      }
-
-      // Price protection: renew on the pinned version unless an intent says
-      // otherwise. Never look up the latest PUBLISHED version here.
-      let version = period.planVersion;
-      let interval = period.interval;
-      let quantity = period.quantity ?? 1;
-      let applyingChangeId: string | null = null;
-
-      if (pending?.kind === 'CHANGE') {
-        const target = pending.targetPlanVersion ?? period.planVersion;
-        const targetInterval = pending.targetInterval ?? interval;
-        const targetPrice = targetInterval
-          ? this.priceFor(target, targetInterval, period.currency ?? 'cny')
-          : null;
-
-        if (isRenewable(target.status) && targetInterval && targetPrice) {
-          version = target;
-          interval = targetInterval;
-          quantity = pending.targetQuantity ?? quantity;
-          applyingChangeId = pending.id;
-        } else {
-          // The deal agreed to no longer exists: record that, then renew the
-          // current terms rather than silently swapping in something else.
-          await tx.subscriptionChange.update({
-            where: { id: pending.id },
-            data: {
-              status: 'FAILED',
-              pendingKey: null,
-              appliedAt: period.endsAt,
-              failureReason: isRenewable(target.status)
-                ? 'TERM_NOT_AVAILABLE'
-                : 'VERSION_RETIRED',
-            },
-          });
-        }
-      }
-
-      const currency = period.currency ?? 'cny';
-      const price = interval
-        ? this.priceFor(version, interval, currency)
-        : null;
-
-      if (!isRenewable(version.status) || !interval || !price) {
-        await this.closePeriod(tx, period, {
-          endedAt: period.endsAt,
-          closeReason: 'EXPIRED',
-          grantStatus: 'EXPIRED',
-        });
-        await tx.subscription.update({
-          where: { id },
-          data: { status: 'EXPIRED', endedAt: period.endsAt, openKey: null },
-        });
-        return true;
-      }
-
-      await this.closePeriod(tx, period, {
-        endedAt: period.endsAt,
-        closeReason: 'RENEWED',
-        grantStatus: 'EXPIRED',
-      });
-
-      const next = await this.createPeriodWithGrant(tx, {
-        subscriptionId: id,
-        sequence: period.sequence + 1,
-        version,
-        kind: 'PAID',
-        terms: {
-          interval,
-          quantity,
-          unitPriceCents: price.priceCents,
-          currency,
-          maxActivations: version.maxActivations,
-        },
-        startsAt: period.endsAt,
-        endsAt: addInterval(period.endsAt, interval),
-      });
-
-      if (applyingChangeId) {
-        await tx.subscriptionChange.update({
-          where: { id: applyingChangeId },
-          data: {
-            status: 'APPLIED',
-            pendingKey: null,
-            appliedAt: period.endsAt,
-            appliedPeriodId: next.id,
-          },
-        });
-      }
-
-      await tx.subscription.update({
-        where: { id },
-        data: { status: 'ACTIVE' },
-      });
-
-      return true;
-    });
-  }
-
-  private async createPeriodWithGrant(
-    tx: Db,
-    params: CreatePeriodParams,
-  ): Promise<PeriodRow> {
-    const period = await tx.subscriptionPeriod.create({
-      data: {
-        subscriptionId: params.subscriptionId,
-        sequence: params.sequence,
-        planVersionId: params.version.id,
-        kind: params.kind,
-        status: 'ACTIVE',
-        currentKey: params.subscriptionId,
-        interval: params.terms.interval,
-        quantity: params.terms.quantity,
-        unitPriceCents: params.terms.unitPriceCents,
-        currency: params.terms.currency,
-        maxActivations: params.terms.maxActivations,
-        startsAt: params.startsAt,
-        endsAt: params.endsAt,
-      },
-      include: PERIOD_INCLUDE,
-    });
-
-    await tx.entitlementGrant.create({
-      data: {
-        subscriptionId: params.subscriptionId,
-        subscriptionPeriodId: period.id,
-        planVersionId: params.version.id,
-        status: 'ACTIVE',
-        activeKey: params.subscriptionId,
-        effectiveAt: params.startsAt,
-        expiresAt: params.endsAt,
-        items: {
-          create: params.version.features.map((link) => ({
-            feature: { connect: { id: link.featureId } },
-            // Stored JSON is never a database NULL, only a JSON value.
-            value: link.value as Prisma.InputJsonValue,
-            valueType: link.feature.valueType,
-            consumable: link.feature.consumable,
-            limit:
-              link.feature.consumable && typeof link.value === 'number'
-                ? link.value
-                : null,
-          })),
-        },
-      },
-    });
-
-    return period;
-  }
-
-  private async closePeriod(
-    tx: Db,
-    period: PeriodRow,
-    options: {
-      readonly endedAt: Date;
-      readonly closeReason: SubscriptionPeriodCloseReason;
-      readonly grantStatus: EntitlementGrantStatus;
-    },
-  ): Promise<void> {
-    await tx.subscriptionPeriod.update({
-      where: { id: period.id },
-      data: {
-        status: 'CLOSED',
-        currentKey: null,
-        endedAt: options.endedAt,
-        closeReason: options.closeReason,
-      },
-    });
-
-    if (period.grant) {
-      await tx.entitlementGrant.update({
-        where: { id: period.grant.id },
-        data: {
-          status: options.grantStatus,
-          activeKey: null,
-          closedAt: options.endedAt,
-          expiresAt: options.endedAt,
-        },
-      });
-    }
-  }
-
   private async resolveTarget(
-    tx: Db,
+    tx: Prisma.TransactionClient,
     productId: string,
     period: PeriodRow,
     input: ChangeSubscriptionInput,
@@ -916,7 +605,7 @@ export class SubscriptionsService {
 
     const quantity = input.quantity ?? period.quantity ?? 1;
     const currency = period.currency ?? 'cny';
-    const price = this.priceFor(version, interval, currency);
+    const price = priceFor(version, interval, currency);
     if (!price) {
       throw AppException.unprocessable(
         `That plan is not sold as ${interval} in ${currency}`,
@@ -936,39 +625,19 @@ export class SubscriptionsService {
     };
   }
 
-  private publishedVersion(db: Db, planId: string): Promise<VersionRow | null> {
+  private publishedVersion(
+    db: Prisma.TransactionClient,
+    planId: string,
+  ): Promise<VersionRow | null> {
     return db.planVersion.findFirst({
       where: { planId, status: 'PUBLISHED' },
       include: VERSION_INCLUDE,
     });
   }
 
-  private priceFor(
-    version: VersionRow,
-    interval: PlanInterval,
-    currency: string,
-  ): { readonly priceCents: number; readonly currency: string } | null {
-    return (
-      version.prices.find(
-        (candidate) =>
-          candidate.interval === interval && candidate.currency === currency,
-      ) ?? null
-    );
-  }
-
-  private currentPeriod(
-    db: Db,
-    subscriptionId: string,
-  ): Promise<PeriodRow | null> {
-    return db.subscriptionPeriod.findFirst({
-      where: { subscriptionId, status: 'ACTIVE' },
-      include: PERIOD_INCLUDE,
-    });
-  }
-
   /** Serialises every write path on the subscription row before reading it. */
   private async lockOwned(
-    tx: Db,
+    tx: Prisma.TransactionClient,
     userId: string,
     id: string,
   ): Promise<{ id: string; productId: string; status: string }> {
@@ -997,7 +666,7 @@ export class SubscriptionsService {
   }
 
   private async ensureNoPendingChange(
-    tx: Db,
+    tx: Prisma.TransactionClient,
     subscriptionId: string,
   ): Promise<void> {
     const pending = await tx.subscriptionChange.findFirst({
@@ -1012,8 +681,49 @@ export class SubscriptionsService {
     }
   }
 
+  /**
+   * Once a renewal is paid it cannot be re-priced: the money already bought
+   * specific terms, so changing them is a refund decision, not a silent edit.
+   */
+  private async assertNoPaidRenewal(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+  ): Promise<void> {
+    const paid = await tx.order.findFirst({
+      where: {
+        subscriptionId,
+        status: 'PAID',
+        appliedPeriodId: null,
+        sourcePeriod: { status: 'ACTIVE' },
+      },
+      select: { id: true },
+    });
+    if (paid) {
+      throw AppException.conflict(
+        'The current period has already been paid; changes apply after it ends',
+        'RenewalAlreadyPaid',
+      );
+    }
+  }
+
+  /** An unpaid renewal/change order is just a draft and may be repriced. */
+  private closePendingOrders(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+  ): Promise<{ count: number }> {
+    return tx.order.updateMany({
+      where: { subscriptionId, status: 'PENDING' },
+      data: {
+        status: 'CLOSED',
+        closedAt: new Date(),
+        pendingKey: null,
+        renewalKey: null,
+      },
+    });
+  }
+
   private discardPendingChanges(
-    tx: Db,
+    tx: Prisma.TransactionClient,
     subscriptionId: string,
   ): Promise<{ count: number }> {
     return tx.subscriptionChange.updateMany({
@@ -1023,7 +733,7 @@ export class SubscriptionsService {
   }
 
   private recordAppliedChange(
-    tx: Db,
+    tx: Prisma.TransactionClient,
     subscriptionId: string,
     kind: 'PAUSE' | 'RESUME' | 'CANCEL',
     userId: string,
@@ -1062,7 +772,10 @@ export class SubscriptionsService {
     );
   }
 
-  private async loadView(db: Db, id: string): Promise<SubscriptionView> {
+  private async loadView(
+    db: Prisma.TransactionClient,
+    id: string,
+  ): Promise<SubscriptionView> {
     const row = await db.subscription.findUnique({
       where: { id },
       include: VIEW_INCLUDE,

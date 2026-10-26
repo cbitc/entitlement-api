@@ -12,7 +12,8 @@ export const createSubscriptionSchema = z.object({
   interval: planIntervalSchema,
   currency: z.string().trim().length(3).toLowerCase().default('cny'),
   quantity: quantitySchema.default(1),
-  trial: z.boolean().default(false),
+  // Paid purchases go through `POST /orders`; this route only starts trials.
+  trial: z.literal(true),
 });
 
 /**

@@ -118,4 +118,34 @@ export class AppConfig {
       from: this.value('SMTP_FROM'),
     };
   }
+
+  get paymentProvider(): Env['PAYMENT_PROVIDER'] {
+    return this.value('PAYMENT_PROVIDER');
+  }
+
+  get orderTtlMinutes(): number {
+    return this.value('ORDER_TTL_MINUTES');
+  }
+
+  get renewalLeadDays(): number {
+    return this.value('RENEWAL_LEAD_DAYS');
+  }
+
+  get alipay(): {
+    appId: string;
+    privateKey: string;
+    publicKey: string;
+    gatewayUrl: string;
+    notifyUrl: string;
+    returnUrl: string;
+  } {
+    return {
+      appId: this.value('ALIPAY_APP_ID'),
+      privateKey: this.value('ALIPAY_PRIVATE_KEY'),
+      publicKey: this.value('ALIPAY_PUBLIC_KEY'),
+      gatewayUrl: this.value('ALIPAY_GATEWAY_URL'),
+      notifyUrl: this.value('PAYMENT_NOTIFY_URL'),
+      returnUrl: this.value('PAYMENT_RETURN_URL'),
+    };
+  }
 }

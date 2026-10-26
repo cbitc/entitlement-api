@@ -10,6 +10,9 @@ const productionEnv = {
   ...baseEnv,
   NODE_ENV: 'production',
   SMTP_HOST: 'smtp.example.com',
+  ALIPAY_APP_ID: '2026000000000000',
+  ALIPAY_PRIVATE_KEY: 'private-key',
+  ALIPAY_PUBLIC_KEY: 'public-key',
 };
 
 describe('validateEnv', () => {
@@ -91,5 +94,22 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...baseEnv, MAIL_TRANSPORT: 'smtp' })).toThrow(
       /SMTP_HOST/,
     );
+  });
+
+  it('defaults the payment provider by environment', () => {
+    expect(validateEnv(baseEnv).PAYMENT_PROVIDER).toBe('log');
+    expect(validateEnv(productionEnv).PAYMENT_PROVIDER).toBe('alipay');
+  });
+
+  it('refuses the fake payment provider in production', () => {
+    expect(() =>
+      validateEnv({ ...productionEnv, PAYMENT_PROVIDER: 'log' }),
+    ).toThrow(/PAYMENT_PROVIDER/);
+  });
+
+  it('requires Alipay credentials when Alipay is selected', () => {
+    expect(() =>
+      validateEnv({ ...baseEnv, PAYMENT_PROVIDER: 'alipay' }),
+    ).toThrow(/ALIPAY_APP_ID/);
   });
 });
