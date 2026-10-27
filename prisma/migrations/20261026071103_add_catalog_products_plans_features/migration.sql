@@ -58,8 +58,6 @@ CREATE TABLE `Feature` (
     `code` VARCHAR(64) NOT NULL,
     `displayName` VARCHAR(120) NOT NULL,
     `description` TEXT NULL,
-    `valueType` ENUM('BOOLEAN', 'NUMBER', 'TEXT') NOT NULL DEFAULT 'BOOLEAN',
-    `unit` VARCHAR(32) NULL,
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL,
 
@@ -72,7 +70,6 @@ CREATE TABLE `PlanFeature` (
     `id` VARCHAR(191) NOT NULL,
     `planId` VARCHAR(191) NOT NULL,
     `featureId` VARCHAR(191) NOT NULL,
-    `value` JSON NOT NULL,
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL,
 

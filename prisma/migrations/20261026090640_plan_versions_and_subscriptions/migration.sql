@@ -3,13 +3,10 @@
 
   Every existing plan becomes version 1 of itself. A plan that was active is
   PUBLISHED (and therefore still sellable); an inactive one becomes DRAFT so it
-  keeps its content without being offered. Prices and feature values move onto
+  keeps its content without being offered. Prices and feature lists move onto
   that version, which is what makes later commercial edits a new row instead of
   an update that would silently change what existing subscribers own.
 */
-
--- AlterTable
-ALTER TABLE `Feature` ADD COLUMN `consumable` BOOLEAN NOT NULL DEFAULT false;
 
 -- CreateTable
 CREATE TABLE `PlanVersion` (
@@ -52,7 +49,6 @@ CREATE TABLE `PlanVersionFeature` (
     `id` VARCHAR(191) NOT NULL,
     `planVersionId` VARCHAR(191) NOT NULL,
     `featureId` VARCHAR(191) NOT NULL,
-    `value` JSON NOT NULL,
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL,
 
@@ -71,8 +67,8 @@ SELECT UUID(), `version`.`id`, `price`.`interval`, `price`.`currency`, `price`.`
 FROM `PlanPrice` `price`
 JOIN `PlanVersion` `version` ON `version`.`planId` = `price`.`planId` AND `version`.`version` = 1;
 
-INSERT INTO `PlanVersionFeature` (`id`, `planVersionId`, `featureId`, `value`, `createdAt`, `updatedAt`)
-SELECT UUID(), `version`.`id`, `feature`.`featureId`, `feature`.`value`, `feature`.`createdAt`, `feature`.`updatedAt`
+INSERT INTO `PlanVersionFeature` (`id`, `planVersionId`, `featureId`, `createdAt`, `updatedAt`)
+SELECT UUID(), `version`.`id`, `feature`.`featureId`, `feature`.`createdAt`, `feature`.`updatedAt`
 FROM `PlanFeature` `feature`
 JOIN `PlanVersion` `version` ON `version`.`planId` = `feature`.`planId` AND `version`.`version` = 1;
 
@@ -179,59 +175,6 @@ CREATE TABLE `TrialRedemption` (
     PRIMARY KEY (`userId`, `productId`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
--- CreateTable
-CREATE TABLE `EntitlementGrant` (
-    `id` VARCHAR(191) NOT NULL,
-    `subscriptionId` VARCHAR(191) NOT NULL,
-    `subscriptionPeriodId` VARCHAR(191) NOT NULL,
-    `planVersionId` VARCHAR(191) NOT NULL,
-    `status` ENUM('ACTIVE', 'SUSPENDED', 'EXPIRED', 'SUPERSEDED', 'REVOKED') NOT NULL DEFAULT 'ACTIVE',
-    `activeKey` VARCHAR(191) NULL,
-    `effectiveAt` DATETIME(3) NOT NULL,
-    `expiresAt` DATETIME(3) NOT NULL,
-    `closedAt` DATETIME(3) NULL,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    `updatedAt` DATETIME(3) NOT NULL,
-
-    UNIQUE INDEX `EntitlementGrant_subscriptionPeriodId_key`(`subscriptionPeriodId`),
-    UNIQUE INDEX `EntitlementGrant_activeKey_key`(`activeKey`),
-    INDEX `EntitlementGrant_subscriptionId_status_idx`(`subscriptionId`, `status`),
-    INDEX `EntitlementGrant_planVersionId_idx`(`planVersionId`),
-    PRIMARY KEY (`id`)
-) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
--- CreateTable
-CREATE TABLE `EntitlementGrantItem` (
-    `id` VARCHAR(191) NOT NULL,
-    `grantId` VARCHAR(191) NOT NULL,
-    `featureId` VARCHAR(191) NOT NULL,
-    `value` JSON NOT NULL,
-    `valueType` ENUM('BOOLEAN', 'NUMBER', 'TEXT') NOT NULL,
-    `consumable` BOOLEAN NOT NULL DEFAULT false,
-    `limit` INTEGER NULL,
-    `used` INTEGER NOT NULL DEFAULT 0,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    `updatedAt` DATETIME(3) NOT NULL,
-
-    INDEX `EntitlementGrantItem_featureId_idx`(`featureId`),
-    UNIQUE INDEX `EntitlementGrantItem_grantId_featureId_key`(`grantId`, `featureId`),
-    PRIMARY KEY (`id`)
-) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
--- CreateTable
-CREATE TABLE `EntitlementUsage` (
-    `id` VARCHAR(191) NOT NULL,
-    `grantItemId` VARCHAR(191) NOT NULL,
-    `requestId` VARCHAR(128) NOT NULL,
-    `amount` INTEGER NOT NULL,
-    `metadata` JSON NULL,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-
-    INDEX `EntitlementUsage_grantItemId_createdAt_idx`(`grantItemId`, `createdAt`),
-    UNIQUE INDEX `EntitlementUsage_grantItemId_requestId_key`(`grantItemId`, `requestId`),
-    PRIMARY KEY (`id`)
-) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 -- CreateIndex
 CREATE INDEX `Plan_productId_sortOrder_idx` ON `Plan`(`productId`, `sortOrder`);
 
@@ -282,21 +225,3 @@ ALTER TABLE `TrialRedemption` ADD CONSTRAINT `TrialRedemption_productId_fkey` FO
 
 -- AddForeignKey
 ALTER TABLE `TrialRedemption` ADD CONSTRAINT `TrialRedemption_subscriptionId_fkey` FOREIGN KEY (`subscriptionId`) REFERENCES `Subscription`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementGrant` ADD CONSTRAINT `EntitlementGrant_subscriptionId_fkey` FOREIGN KEY (`subscriptionId`) REFERENCES `Subscription`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementGrant` ADD CONSTRAINT `EntitlementGrant_subscriptionPeriodId_fkey` FOREIGN KEY (`subscriptionPeriodId`) REFERENCES `SubscriptionPeriod`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementGrant` ADD CONSTRAINT `EntitlementGrant_planVersionId_fkey` FOREIGN KEY (`planVersionId`) REFERENCES `PlanVersion`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementGrantItem` ADD CONSTRAINT `EntitlementGrantItem_grantId_fkey` FOREIGN KEY (`grantId`) REFERENCES `EntitlementGrant`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementGrantItem` ADD CONSTRAINT `EntitlementGrantItem_featureId_fkey` FOREIGN KEY (`featureId`) REFERENCES `Feature`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE `EntitlementUsage` ADD CONSTRAINT `EntitlementUsage_grantItemId_fkey` FOREIGN KEY (`grantItemId`) REFERENCES `EntitlementGrantItem`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;

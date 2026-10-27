@@ -70,7 +70,7 @@ model VerificationCode {
   @@index([email, createdAt])
 }
 
-/// A sellable product. Descriptive metadata only: pricing and entitlements live
+/// A sellable product. Descriptive metadata only: pricing and features live
 /// on its plans, so editing a product page never changes what a customer owns.
 model Product {
   id               String            @id @default(cuid())
@@ -96,7 +96,7 @@ model Product {
 
 /// A way of selling one product: the edition the customer is entitled to
 /// (`standard`, `pro`). Only identity and shop presentation live here. Price,
-/// billing terms, device limits and entitlements are content, and content
+/// billing terms, device limits and features are content, and content
 /// belongs to an immutable `PlanVersion` — so editing this row can never change
 /// what an existing subscriber owns.
 ///
@@ -168,7 +168,6 @@ model PlanVersion {
   prices              PlanVersionPrice[]
   features            PlanVersionFeature[]
   periods             SubscriptionPeriod[]
-  grants              EntitlementGrant[]
   scheduledChanges    SubscriptionChange[]
   orders              Order[]
 
@@ -198,42 +197,27 @@ enum PlanInterval {
 }
 
 /// A catalogue-wide capability that plans can grant, e.g. `ai-assistant`.
-/// `valueType` tells readers how to interpret the JSON value on
-/// PlanVersionFeature. `consumable` marks a numeric capability whose value is a
-/// per-period allowance that a grant may meter (`ai.credits`); a missing row
-/// always means "not included".
+/// Features are boolean: a `PlanVersionFeature` row means "included" and its
+/// absence means "not included", so there is no value to interpret.
 model Feature {
-  id          String                 @id @default(cuid())
-  code        String                 @unique @db.VarChar(64)
-  displayName String                 @db.VarChar(120)
-  description String?                @db.Text
-  valueType   FeatureValueType       @default(BOOLEAN)
-  /// Display hint for numeric values, e.g. `devices` or `projects`.
-  unit        String?                @db.VarChar(32)
-  /// TRUE only for NUMBER features that are an allowance rather than a limit.
-  consumable  Boolean                @default(false)
-  createdAt   DateTime               @default(now()) @db.DateTime(3)
-  updatedAt   DateTime               @updatedAt @db.DateTime(3)
+  id          String               @id @default(cuid())
+  code        String               @unique @db.VarChar(64)
+  displayName String               @db.VarChar(120)
+  description String?              @db.Text
+  createdAt   DateTime             @default(now()) @db.DateTime(3)
+  updatedAt   DateTime             @updatedAt @db.DateTime(3)
   versions    PlanVersionFeature[]
-  grantItems  EntitlementGrantItem[]
 }
 
-enum FeatureValueType {
-  BOOLEAN
-  NUMBER
-  TEXT
-}
-
-/// The value a version grants for one feature; a missing row means "not
-/// included". The value's shape follows `Feature.valueType`. Rows are frozen
-/// together with their version.
+/// A capability a version grants. The row is the whole statement: present
+/// means included, absent means not included. Rows are frozen together with
+/// their version, so a running period always reads the same list.
 model PlanVersionFeature {
   id            String      @id @default(cuid())
   planVersionId String
   planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
   featureId     String
   feature       Feature     @relation(fields: [featureId], references: [id], onDelete: Restrict)
-  value         Json
   createdAt     DateTime    @default(now()) @db.DateTime(3)
   updatedAt     DateTime    @updatedAt @db.DateTime(3)
 
@@ -264,7 +248,6 @@ model Subscription {
   updatedAt        DateTime             @updatedAt @db.DateTime(3)
   periods          SubscriptionPeriod[]
   changes          SubscriptionChange[]
-  grants           EntitlementGrant[]
   trialRedemptions TrialRedemption[]
   orders           Order[]
   activations      DeviceActivation[]
@@ -275,7 +258,8 @@ model Subscription {
 
 /// One machine that consumed an activation slot of the license a subscription
 /// grants. The license itself is not a table: it is derived from the active
-/// period and its grant, so it can never disagree with the subscription.
+/// period and the version that period pinned, so it can never disagree with
+/// the subscription.
 ///
 /// `activeKey` holds `${subscriptionId}:${machineId}` while the activation is
 /// live and NULL once the device is deactivated; its uniqueness makes obtain
@@ -362,7 +346,6 @@ model SubscriptionPeriod {
   closeReason    SubscriptionPeriodCloseReason?
   createdAt      DateTime                       @default(now()) @db.DateTime(3)
   updatedAt      DateTime                       @updatedAt @db.DateTime(3)
-  grant          EntitlementGrant?
   appliedChanges SubscriptionChange[]           @relation("ChangeAppliedPeriod")
   sourceOrders   Order[]                        @relation("OrderSourcePeriod")
   appliedOrder   Order?                         @relation("OrderAppliedPeriod")
@@ -439,87 +422,6 @@ model TrialRedemption {
 
   @@id([userId, productId])
   @@index([productId])
-}
-
-/// The materialised entitlement of exactly one period.
-///
-/// Created from the pinned version inside the period transaction, and read by
-/// every authorisation check: the catalogue is never consulted at runtime, so
-/// publishing, closing or retiring a version cannot change a running period.
-///
-/// `activeKey` holds the subscription id while the grant is ACTIVE or SUSPENDED
-/// and NULL once it is closed, giving "at most one live grant per subscription".
-model EntitlementGrant {
-  id                   String                 @id @default(cuid())
-  subscriptionId       String
-  subscription         Subscription           @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  subscriptionPeriodId String                 @unique
-  subscriptionPeriod   SubscriptionPeriod     @relation(fields: [subscriptionPeriodId], references: [id], onDelete: Cascade)
-  /// Kept for audit: which version this grant was materialised from.
-  planVersionId        String
-  planVersion          PlanVersion            @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
-  status               EntitlementGrantStatus @default(ACTIVE)
-  activeKey            String?                @unique @db.VarChar(191)
-  effectiveAt          DateTime               @db.DateTime(3)
-  expiresAt            DateTime               @db.DateTime(3)
-  closedAt             DateTime?              @db.DateTime(3)
-  createdAt            DateTime               @default(now()) @db.DateTime(3)
-  updatedAt            DateTime               @updatedAt @db.DateTime(3)
-  items                EntitlementGrantItem[]
-
-  @@index([subscriptionId, status])
-  @@index([planVersionId])
-}
-
-/// `SUSPENDED` mirrors a paused subscription (usage is kept, spending is not);
-/// `SUPERSEDED` means a mid-term change replaced it before its window closed.
-enum EntitlementGrantStatus {
-  ACTIVE
-  SUSPENDED
-  EXPIRED
-  SUPERSEDED
-  REVOKED
-}
-
-/// One frozen capability of a grant. `value`, `valueType` and `consumable` are
-/// copied from the pinned version so that later catalogue edits cannot alter
-/// what this period promised; `limit` and `used` exist only for consumables.
-model EntitlementGrantItem {
-  id         String             @id @default(cuid())
-  grantId    String
-  grant      EntitlementGrant   @relation(fields: [grantId], references: [id], onDelete: Cascade)
-  featureId  String
-  feature    Feature            @relation(fields: [featureId], references: [id], onDelete: Restrict)
-  value      Json
-  valueType  FeatureValueType
-  consumable Boolean            @default(false)
-  /// Per-period allowance, snapshot of the version value; NULL if not metered.
-  limit      Int?
-  /// Cached sum of `EntitlementUsage`; must never exceed `limit`.
-  used       Int                @default(0)
-  createdAt  DateTime           @default(now()) @db.DateTime(3)
-  updatedAt  DateTime           @updatedAt @db.DateTime(3)
-  usages     EntitlementUsage[]
-
-  @@unique([grantId, featureId])
-  @@index([featureId])
-}
-
-/// Append-only spending log. `(grantItemId, requestId)` makes a retried call
-/// idempotent instead of double-charging the allowance. Usage is not exposed by
-/// the API yet, but the table lands with the model so grants never need a
-/// destructive migration to become metered.
-model EntitlementUsage {
-  id          String               @id @default(cuid())
-  grantItemId String
-  grantItem   EntitlementGrantItem @relation(fields: [grantItemId], references: [id], onDelete: Restrict)
-  requestId   String               @db.VarChar(128)
-  amount      Int
-  metadata    Json?
-  createdAt   DateTime             @default(now()) @db.DateTime(3)
-
-  @@unique([grantItemId, requestId])
-  @@index([grantItemId, createdAt])
 }
 
 /// What a payment is buying. `NEW_SUBSCRIPTION` has no subscription yet — the

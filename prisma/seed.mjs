@@ -13,23 +13,16 @@ const FEATURES = [
     code: 'ai-assistant',
     displayName: 'AI Assistant',
     description: 'In-editor AI completions and chat.',
-    valueType: 'BOOLEAN',
-    unit: null,
   },
   {
-    code: 'max-projects',
-    displayName: 'Open projects',
-    description: 'How many projects may be open at the same time.',
-    valueType: 'NUMBER',
-    unit: 'projects',
+    code: 'code-insights',
+    displayName: 'Code Insights',
+    description: 'Project-wide inspections and dependency analysis.',
   },
   {
-    code: 'ai-credits',
-    displayName: 'AI credits',
-    description: 'Monthly AI allowance consumed by completions and chat.',
-    valueType: 'NUMBER',
-    unit: 'credits',
-    consumable: true,
+    code: 'team-sharing',
+    displayName: 'Team Sharing',
+    description: 'Share projects and settings with teammates.',
   },
 ];
 
@@ -57,7 +50,7 @@ const PRODUCTS = [
           { interval: 'MONTH', currency: 'cny', priceCents: 9900 },
           { interval: 'YEAR', currency: 'cny', priceCents: 99000 },
         ],
-        features: { 'ai-assistant': false, 'max-projects': 5 },
+        features: ['code-insights'],
       },
       {
         code: 'pro',
@@ -72,11 +65,7 @@ const PRODUCTS = [
           { interval: 'MONTH', currency: 'cny', priceCents: 29900 },
           { interval: 'YEAR', currency: 'cny', priceCents: 299000 },
         ],
-        features: {
-          'ai-assistant': true,
-          'max-projects': 100,
-          'ai-credits': 500,
-        },
+        features: ['ai-assistant', 'code-insights', 'team-sharing'],
       },
     ],
   },
@@ -90,11 +79,8 @@ const seedFeatures = async () => {
       update: {
         displayName: feature.displayName,
         description: feature.description,
-        valueType: feature.valueType,
-        unit: feature.unit,
-        consumable: feature.consumable ?? false,
       },
-      create: { consumable: false, ...feature },
+      create: feature,
     });
     byCode.set(feature.code, row);
   }
@@ -154,12 +140,12 @@ const seedPlan = async (productId, plan, featuresByCode) => {
         create: prices.map((price) => ({ ...price })),
       },
       features: {
-        create: Object.entries(features).map(([featureCode, value]) => {
+        create: features.map((featureCode) => {
           const feature = featuresByCode.get(featureCode);
           if (!feature) {
             throw new Error(`Seed references unknown feature "${featureCode}"`);
           }
-          return { featureId: feature.id, value };
+          return { featureId: feature.id };
         }),
       },
     },

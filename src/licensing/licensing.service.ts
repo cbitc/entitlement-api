@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
 import { PrismaService } from '../infra/prisma/prisma.service';
@@ -27,13 +27,10 @@ const LICENSE_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
     orderBy: { sequence: 'desc' },
     take: 1,
     include: {
-      planVersion: { select: { plan: { select: { code: true } } } },
-      grant: {
+      planVersion: {
         select: {
-          id: true,
-          status: true,
-          effectiveAt: true,
-          expiresAt: true,
+          plan: { select: { code: true } },
+          features: { select: { feature: { select: { code: true } } } },
         },
       },
     },
@@ -54,7 +51,10 @@ type LicenseRow = Prisma.SubscriptionGetPayload<{
 }>;
 
 type LicensePeriod = LicenseRow['periods'][number];
-type LicenseGrant = NonNullable<LicensePeriod['grant']>;
+
+/** The period's pinned version is the grant: its feature rows are the answer. */
+const featureCodes = (period: LicensePeriod | undefined): readonly string[] =>
+  period?.planVersion.features.map((link) => link.feature.code).sort() ?? [];
 
 const activeKeyFor = (subscriptionId: string, machineId: string): string =>
   `${subscriptionId}:${machineId}`;
@@ -76,14 +76,12 @@ const toActivationView = (
 /**
  * The licence is a projection of the subscription, never a row of its own.
  *
- * `Subscription` + its ACTIVE `SubscriptionPeriod` + the period's
- * `EntitlementGrant` already answer "who may use which edition until when", so
- * the only new state is which machines hold an activation slot.
+ * `Subscription` + its ACTIVE `SubscriptionPeriod` + the immutable
+ * `PlanVersion` that period pinned already answer "who may use which features
+ * until when", so the only new state is which machines hold a slot.
  */
 @Injectable()
 export class LicensingService {
-  private readonly logger = new Logger(LicensingService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokens: LicenseTokenService,
@@ -120,7 +118,7 @@ export class LicensingService {
         throw noActiveSubscription();
       }
 
-      const { period, grant } = this.assertLicensable(row, now);
+      const period = this.assertLicensable(row, now);
       const activeKey = activeKeyFor(row.id, input.machineId);
 
       const existing = await tx.deviceActivation.findUnique({
@@ -157,7 +155,8 @@ export class LicensingService {
         product: row.product.code,
         plan: period.planVersion.plan.code,
         trial: period.kind === 'TRIAL',
-        grantExpiresAt: grant.expiresAt,
+        features: featureCodes(period),
+        periodEndsAt: period.endsAt,
       };
     });
 
@@ -167,9 +166,10 @@ export class LicensingService {
         product: resolved.product,
         plan: resolved.plan,
         trial: resolved.trial,
+        features: resolved.features,
         machineId: input.machineId,
         offline,
-        expiresAt: resolved.grantExpiresAt,
+        expiresAt: resolved.periodEndsAt,
       },
       now,
     );
@@ -178,6 +178,7 @@ export class LicensingService {
       token: issued.token,
       plan: resolved.plan,
       trial: resolved.trial,
+      features: resolved.features,
       expiresAt: issued.expiresAt.toISOString(),
     };
   }
@@ -256,85 +257,6 @@ export class LicensingService {
     };
   }
 
-  /**
-   * Break-glass revocation: the entitlement is withdrawn but the contract is
-   * left alone. The next period creates a fresh grant, so this is not a
-   * substitute for cancelling the subscription.
-   */
-  async adminRevoke(
-    actorUserId: string,
-    email: string,
-    product: string,
-    now: Date = new Date(),
-  ): Promise<void> {
-    const user = await this.prisma.user.findUnique({
-      where: { email },
-      select: { id: true },
-    });
-    if (!user) {
-      throw AppException.notFound('User not found', 'UserNotFound');
-    }
-
-    const subscription = await this.prisma.subscription.findFirst({
-      where: {
-        userId: user.id,
-        product: { code: product },
-        status: { in: [...VISIBLE_STATUSES] },
-        openKey: { not: null },
-      },
-      orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
-      select: { id: true },
-    });
-    if (!subscription) {
-      throw AppException.notFound(
-        'No license matches this email and product',
-        'LicenseNotFound',
-      );
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`
-        SELECT id FROM \`Subscription\` WHERE id = ${subscription.id} FOR UPDATE
-      `;
-
-      const period = await tx.subscriptionPeriod.findFirst({
-        where: { subscriptionId: subscription.id, status: 'ACTIVE' },
-        orderBy: { sequence: 'desc' },
-        select: {
-          id: true,
-          grant: { select: { id: true, status: true } },
-        },
-      });
-      if (
-        !period?.grant ||
-        (period.grant.status !== 'ACTIVE' &&
-          period.grant.status !== 'SUSPENDED')
-      ) {
-        throw AppException.notFound(
-          'No revocable license exists for this product',
-          'LicenseNotFound',
-        );
-      }
-
-      await tx.entitlementGrant.update({
-        where: { id: period.grant.id },
-        data: {
-          status: 'REVOKED',
-          activeKey: null,
-          closedAt: now,
-        },
-      });
-      await tx.deviceActivation.updateMany({
-        where: { subscriptionId: subscription.id, activeKey: { not: null } },
-        data: { activeKey: null, deactivatedAt: now },
-      });
-    });
-
-    this.logger.warn(
-      `License revoked by ${actorUserId} for ${email}/${product}`,
-    );
-  }
-
   private findSubscription(
     db: Prisma.TransactionClient,
     userId: string,
@@ -353,23 +275,17 @@ export class LicensingService {
     });
   }
 
-  private assertLicensable(
-    row: LicenseRow,
-    now: Date,
-  ): { period: LicensePeriod; grant: LicenseGrant } {
+  private assertLicensable(row: LicenseRow, now: Date): LicensePeriod {
     const period = row.periods[0];
-    const grant = period?.grant;
     if (
       !period ||
-      !grant ||
-      grant.status !== 'ACTIVE' ||
       (row.status !== 'TRIALING' && row.status !== 'ACTIVE') ||
-      now.getTime() < grant.effectiveAt.getTime() ||
-      now.getTime() >= grant.expiresAt.getTime()
+      now.getTime() < period.startsAt.getTime() ||
+      now.getTime() >= period.endsAt.getTime()
     ) {
       throw noActiveSubscription();
     }
-    return { period, grant };
+    return period;
   }
 }
 
@@ -383,15 +299,16 @@ const toLicenseView = (row: LicenseRow): LicenseView => {
     periodStart: period?.startsAt.toISOString() ?? null,
     periodEnd: period?.endsAt.toISOString() ?? null,
     maxActivations: period?.maxActivations ?? 0,
+    features: featureCodes(period),
     activations: row.activations.map(toActivationView),
   };
 };
 
 /**
- * A revoked or expired grant is history, not a license the caller still holds.
- * Paused subscriptions stay visible so the user can see what is suspended.
+ * An ended period is history, not a license the caller still holds. Paused
+ * subscriptions stay visible so the user can see what is suspended.
  */
 const isVisibleLicense = (row: LicenseRow): boolean => {
-  const grant = row.periods[0]?.grant;
-  return grant?.status === 'ACTIVE' || grant?.status === 'SUSPENDED';
+  const period = row.periods[0];
+  return period !== undefined && period.endsAt.getTime() > Date.now();
 };

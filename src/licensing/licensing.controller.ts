@@ -1,6 +1,5 @@
 import {
   Controller,
-  Delete,
   Get,
   Header,
   HttpCode,
@@ -23,10 +22,8 @@ import { ZodBody, ZodQuery } from '../common/http/zod.decorators';
 import { LicenseTokenService } from './license-token.service';
 import {
   adminLicenseQuerySchema,
-  adminRevokeLicenseSchema,
   licenseMachineSchema,
   type AdminLicenseQuery,
-  type AdminRevokeLicenseInput,
   type LicenseMachineInput,
 } from './licensing.schemas';
 import { LicensingService } from './licensing.service';
@@ -96,20 +93,6 @@ export class LicensingController {
     @ZodQuery(adminLicenseQuerySchema) query: AdminLicenseQuery,
   ): Promise<AdminLicenseListResponse> {
     return this.licensing.adminList(query.email);
-  }
-
-  @Delete('admin/licenses')
-  @Roles('ADMIN')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary: 'Revoke the current license and all activations (admin)',
-  })
-  @ApiNoContentResponse({ description: 'The license was revoked' })
-  async adminRevoke(
-    @CurrentUser() current: AuthenticatedUser,
-    @ZodBody(adminRevokeLicenseSchema) body: AdminRevokeLicenseInput,
-  ): Promise<void> {
-    await this.licensing.adminRevoke(current.id, body.email, body.product);
   }
 }
 

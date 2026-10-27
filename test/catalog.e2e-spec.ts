@@ -62,10 +62,8 @@ describe('Catalog (e2e)', () => {
     });
   };
 
-  const createFeature = (
-    code: string,
-    valueType: 'BOOLEAN' | 'NUMBER' | 'TEXT' = 'BOOLEAN',
-  ) => prisma.feature.create({ data: { code, displayName: code, valueType } });
+  const createFeature = (code: string) =>
+    prisma.feature.create({ data: { code, displayName: code } });
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -82,9 +80,6 @@ describe('Catalog (e2e)', () => {
     await prisma.paymentNotification.deleteMany();
     await prisma.payment.deleteMany();
     await prisma.order.deleteMany();
-    await prisma.entitlementUsage.deleteMany();
-    await prisma.entitlementGrantItem.deleteMany();
-    await prisma.entitlementGrant.deleteMany();
     await prisma.subscriptionChange.deleteMany();
     await prisma.subscriptionPeriod.deleteMany();
     await prisma.subscription.deleteMany();
@@ -101,7 +96,7 @@ describe('Catalog (e2e)', () => {
     await app.close();
   });
 
-  it('lists sellable products with plans, terms, trials and entitlements', async () => {
+  it('lists sellable products with plans, terms, trials and features', async () => {
     const beta = await createProduct('beta', { sortOrder: 20 });
     const alpha = await createProduct('alpha', {
       sortOrder: 10,
@@ -123,13 +118,17 @@ describe('Catalog (e2e)', () => {
     await createPrice(proV1.id, 'MONTH', 29_900);
 
     const ai = await createFeature('ai-assistant');
-    const projects = await createFeature('max-projects', 'NUMBER');
+    const insights = await createFeature('code-insights');
+    const projects = await createFeature('max-projects');
     // Inserted out of order on purpose: the response sorts by feature code.
     await prisma.planVersionFeature.create({
-      data: { planVersionId: proV1.id, featureId: projects.id, value: 100 },
+      data: { planVersionId: proV1.id, featureId: projects.id },
     });
     await prisma.planVersionFeature.create({
-      data: { planVersionId: proV1.id, featureId: ai.id, value: true },
+      data: { planVersionId: proV1.id, featureId: ai.id },
+    });
+    await prisma.planVersionFeature.create({
+      data: { planVersionId: proV1.id, featureId: insights.id },
     });
 
     const betaPlan = await createPlan(beta.id, 'standard');
@@ -174,8 +173,9 @@ describe('Catalog (e2e)', () => {
       { interval: 'YEAR', priceCents: 299_000, currency: 'cny' },
     ]);
     expect(proBody.features).toEqual([
-      { code: 'ai-assistant', value: true },
-      { code: 'max-projects', value: 100 },
+      'ai-assistant',
+      'code-insights',
+      'max-projects',
     ]);
   });
 

@@ -135,7 +135,7 @@ try {
           currentPeriod: subscription.currentPeriod,
           renewal: subscription.renewal,
           pendingChange: subscription.pendingChange,
-          entitlements: subscription.entitlements,
+          features: subscription.features,
         },
         null,
         2,

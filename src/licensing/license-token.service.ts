@@ -15,10 +15,12 @@ export interface IssueLicenseTokenInput {
   readonly product: string;
   readonly plan: string;
   readonly trial: boolean;
+  /** Boolean feature codes granted by the period's pinned version. */
+  readonly features: readonly string[];
   readonly machineId: string;
-  /** Offline tokens get the longer TTL, still capped by the grant. */
+  /** Offline tokens get the longer TTL, still capped by the period. */
   readonly offline: boolean;
-  /** Hard ceiling: the grant's own expiry. */
+  /** Hard ceiling: the end of the period being licensed. */
   readonly expiresAt: Date;
 }
 
@@ -124,6 +126,7 @@ export class LicenseTokenService implements OnModuleInit {
       product: input.product,
       plan: input.plan,
       trial: input.trial,
+      features: [...input.features],
       machineId: input.machineId,
       ...(input.offline ? { offline: true } : {}),
     })

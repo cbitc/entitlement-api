@@ -9,7 +9,7 @@ export interface LicenseActivationView {
 
 /**
  * A license as the API exposes it. There is no license table: this is a read
- * model of the subscription's running period and its grant.
+ * model of the subscription's running period and the version it pinned.
  */
 export interface LicenseView {
   readonly product: string;
@@ -20,6 +20,8 @@ export interface LicenseView {
   readonly periodStart: string | null;
   readonly periodEnd: string | null;
   readonly maxActivations: number;
+  /** Boolean feature codes of the pinned version, sorted. */
+  readonly features: readonly string[];
   readonly activations: readonly LicenseActivationView[];
 }
 
@@ -27,6 +29,7 @@ export interface LicenseTokenView {
   readonly token: string;
   readonly plan: string;
   readonly trial: boolean;
+  readonly features: readonly string[];
   readonly expiresAt: string;
 }
 

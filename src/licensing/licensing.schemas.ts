@@ -18,12 +18,5 @@ export const adminLicenseQuerySchema = z.object({
   email: emailSchema,
 });
 
-/** Body of `DELETE /licensing/admin/licenses`. */
-export const adminRevokeLicenseSchema = z.object({
-  email: emailSchema,
-  product: productCodeSchema,
-});
-
 export type LicenseMachineInput = z.output<typeof licenseMachineSchema>;
 export type AdminLicenseQuery = z.output<typeof adminLicenseQuerySchema>;
-export type AdminRevokeLicenseInput = z.output<typeof adminRevokeLicenseSchema>;

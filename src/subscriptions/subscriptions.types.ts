@@ -51,14 +51,6 @@ export interface SubscriptionChangeView {
   readonly quantity: number | null;
 }
 
-export interface SubscriptionEntitlementView {
-  readonly code: string;
-  readonly value: unknown;
-  readonly limit: number | null;
-  readonly used: number;
-  readonly remaining: number | null;
-}
-
 export interface SubscriptionView {
   readonly id: string;
   readonly productCode: string;
@@ -67,5 +59,9 @@ export interface SubscriptionView {
   readonly currentPeriod: SubscriptionPeriodView | null;
   readonly renewal: SubscriptionRenewalView | null;
   readonly pendingChange: SubscriptionChangeView | null;
-  readonly entitlements: readonly SubscriptionEntitlementView[];
+  /**
+   * Boolean capabilities of the running period, sorted by code. Empty unless
+   * the subscription is live and its period has not ended.
+   */
+  readonly features: readonly string[];
 }

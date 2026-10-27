@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
   Prisma,
-  type EntitlementGrantStatus,
   type PlanInterval,
   type SubscriptionPeriodCloseReason,
   type SubscriptionPeriodKind,
@@ -11,26 +10,12 @@ import { AppException } from '../common/errors/app.exception';
 export const VERSION_INCLUDE = Prisma.validator<Prisma.PlanVersionInclude>()({
   prices: true,
   plan: { select: { id: true, code: true } },
-  features: { include: { feature: true } },
+  features: { select: { feature: { select: { code: true } } } },
 });
 
 export const PERIOD_INCLUDE =
   Prisma.validator<Prisma.SubscriptionPeriodInclude>()({
     planVersion: { include: VERSION_INCLUDE },
-    grant: {
-      select: {
-        id: true,
-        status: true,
-        items: {
-          select: {
-            value: true,
-            limit: true,
-            used: true,
-            feature: { select: { code: true } },
-          },
-        },
-      },
-    },
   });
 
 export type Db = Prisma.TransactionClient;
@@ -78,19 +63,17 @@ export const priceFor = (
   ) ?? null;
 
 /**
- * The only writer of `SubscriptionPeriod` and its grant.
+ * The only writer of `SubscriptionPeriod`.
  *
  * Both the trial path (subscriptions) and the paid path (orders) go through
- * here, so "one ACTIVE period per subscription" and "grant mirrors period"
- * cannot drift between the two entry points.
+ * here, so "one ACTIVE period per subscription" cannot drift between the two
+ * entry points. Entitlement is not materialised: a period pins an immutable
+ * `PlanVersion`, and that version's `PlanVersionFeature` rows are the grant.
  */
 @Injectable()
 export class SubscriptionPeriodsService {
-  async createWithGrant(
-    db: Db,
-    params: CreatePeriodParams,
-  ): Promise<PeriodRow> {
-    const period = await db.subscriptionPeriod.create({
+  async createPeriod(db: Db, params: CreatePeriodParams): Promise<PeriodRow> {
+    return db.subscriptionPeriod.create({
       data: {
         subscriptionId: params.subscriptionId,
         sequence: params.sequence,
@@ -108,33 +91,6 @@ export class SubscriptionPeriodsService {
       },
       include: PERIOD_INCLUDE,
     });
-
-    await db.entitlementGrant.create({
-      data: {
-        subscriptionId: params.subscriptionId,
-        subscriptionPeriodId: period.id,
-        planVersionId: params.version.id,
-        status: 'ACTIVE',
-        activeKey: params.subscriptionId,
-        effectiveAt: params.startsAt,
-        expiresAt: params.endsAt,
-        items: {
-          create: params.version.features.map((link) => ({
-            feature: { connect: { id: link.featureId } },
-            // Stored JSON is never a database NULL, only a JSON value.
-            value: link.value as Prisma.InputJsonValue,
-            valueType: link.feature.valueType,
-            consumable: link.feature.consumable,
-            limit:
-              link.feature.consumable && typeof link.value === 'number'
-                ? link.value
-                : null,
-          })),
-        },
-      },
-    });
-
-    return period;
   }
 
   async close(
@@ -143,7 +99,6 @@ export class SubscriptionPeriodsService {
     options: {
       readonly endedAt: Date;
       readonly closeReason: SubscriptionPeriodCloseReason;
-      readonly grantStatus: EntitlementGrantStatus;
     },
   ): Promise<void> {
     await db.subscriptionPeriod.update({
@@ -155,18 +110,6 @@ export class SubscriptionPeriodsService {
         closeReason: options.closeReason,
       },
     });
-
-    if (period.grant) {
-      await db.entitlementGrant.update({
-        where: { id: period.grant.id },
-        data: {
-          status: options.grantStatus,
-          activeKey: null,
-          closedAt: options.endedAt,
-          expiresAt: options.endedAt,
-        },
-      });
-    }
   }
 
   current(db: Db, subscriptionId: string): Promise<PeriodRow | null> {

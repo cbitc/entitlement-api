@@ -44,7 +44,7 @@ export class OrderFulfillmentService {
       },
     });
 
-    const period = await this.periods.createWithGrant(tx, {
+    const period = await this.periods.createPeriod(tx, {
       subscriptionId: subscription.id,
       sequence: 1,
       version,
@@ -108,10 +108,9 @@ export class OrderFulfillmentService {
     await this.periods.close(tx, current, {
       endedAt: current.endsAt,
       closeReason: 'RENEWED',
-      grantStatus: 'EXPIRED',
     });
 
-    const next = await this.periods.createWithGrant(tx, {
+    const next = await this.periods.createPeriod(tx, {
       subscriptionId: order.subscriptionId,
       sequence: current.sequence + 1,
       version,

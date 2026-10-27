@@ -41,6 +41,12 @@ describe('Licensing (e2e)', () => {
         displayName: 'Standard',
       },
     });
+    const ai = await prisma.feature.create({
+      data: { code: 'ai-assistant', displayName: 'AI Assistant' },
+    });
+    const insights = await prisma.feature.create({
+      data: { code: 'code-insights', displayName: 'Code Insights' },
+    });
     const version = await prisma.planVersion.create({
       data: {
         planId: plan.id,
@@ -53,6 +59,9 @@ describe('Licensing (e2e)', () => {
         trialMaxActivations: 2,
         prices: {
           create: [{ interval: 'MONTH', currency: 'cny', priceCents: 9900 }],
+        },
+        features: {
+          create: [{ featureId: ai.id }, { featureId: insights.id }],
         },
       },
     });
@@ -111,9 +120,6 @@ describe('Licensing (e2e)', () => {
     await prisma.paymentNotification.deleteMany();
     await prisma.payment.deleteMany();
     await prisma.order.deleteMany();
-    await prisma.entitlementUsage.deleteMany();
-    await prisma.entitlementGrantItem.deleteMany();
-    await prisma.entitlementGrant.deleteMany();
     await prisma.deviceActivation.deleteMany();
     await prisma.subscriptionChange.deleteMany();
     await prisma.subscriptionPeriod.deleteMany();
@@ -139,7 +145,11 @@ describe('Licensing (e2e)', () => {
     const trial = await startTrial(token).expect(201);
 
     const first = await obtain(token, 'machine-a').expect(200);
-    expect(first.body).toMatchObject({ plan: 'standard', trial: true });
+    expect(first.body).toMatchObject({
+      plan: 'standard',
+      trial: true,
+      features: ['ai-assistant', 'code-insights'],
+    });
     expect(typeof first.body.token).toBe('string');
 
     const jwks = await getJwks().expect(200);
@@ -160,6 +170,7 @@ describe('Licensing (e2e)', () => {
       product: 'licensing-product',
       plan: 'standard',
       trial: true,
+      features: ['ai-assistant', 'code-insights'],
       machineId: 'machine-a',
     });
     expect(payload.exp).toBe(
@@ -189,6 +200,7 @@ describe('Licensing (e2e)', () => {
       trial: true,
       status: 'TRIALING',
       maxActivations: 2,
+      features: ['ai-assistant', 'code-insights'],
     });
     expect(licenses.body.licenses[0].activations).toHaveLength(2);
   });
@@ -232,6 +244,14 @@ describe('Licensing (e2e)', () => {
     const refused = await obtain(token, 'machine-a').expect(404);
     expect(refused.body.error.type).toBe('NoActiveSubscription');
 
+    // A paused subscription is still a license the user can see, just not use.
+    const pausedList = await http()
+      .get('/licensing/licenses')
+      .set(auth(token))
+      .expect(200);
+    expect(pausedList.body.licenses).toHaveLength(1);
+    expect(pausedList.body.licenses[0]).toMatchObject({ status: 'PAUSED' });
+
     await http()
       .post(`/subscriptions/${trial.body.id}/resume`)
       .set(auth(token))
@@ -259,9 +279,9 @@ describe('Licensing (e2e)', () => {
     );
   });
 
-  it('lets an administrator list and revoke a license', async () => {
+  it('lets an administrator list the licenses of an account', async () => {
     await seedCatalogue();
-    const { user, token } = await signIn('revoked@example.com');
+    const { user, token } = await signIn('admin-target@example.com');
     const admin = await signIn('admin@example.com', 'ADMIN');
     await startTrial(token).expect(201);
     await obtain(token, 'machine-a').expect(200);
@@ -277,28 +297,12 @@ describe('Licensing (e2e)', () => {
       .expect(200);
     expect(listed.body.email).toBe(user.email);
     expect(listed.body.licenses).toHaveLength(1);
+    expect(listed.body.licenses[0]).toMatchObject({
+      product: 'licensing-product',
+      plan: 'standard',
+      features: ['ai-assistant', 'code-insights'],
+    });
     expect(listed.body.licenses[0].activations).toHaveLength(1);
-
-    await http()
-      .delete('/licensing/admin/licenses')
-      .set(auth(admin.token))
-      .send({ email: user.email, product: 'licensing-product' })
-      .expect(204);
-
-    const revoked = await obtain(token, 'machine-a').expect(404);
-    expect(revoked.body.error.type).toBe('NoActiveSubscription');
-
-    const afterRevoke = await http()
-      .get('/licensing/licenses')
-      .set(auth(token))
-      .expect(200);
-    expect(afterRevoke.body.licenses).toHaveLength(0);
-
-    await http()
-      .delete('/licensing/admin/licenses')
-      .set(auth(admin.token))
-      .send({ email: user.email, product: 'licensing-product' })
-      .expect(404);
   });
 
   it('validates the request body and reports unknown products', async () => {

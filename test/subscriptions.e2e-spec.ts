@@ -1,6 +1,6 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
-import type { FeatureValueType, PlanInterval, Prisma } from '@prisma/client';
+import type { PlanInterval } from '@prisma/client';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
@@ -45,14 +45,8 @@ describe('Subscriptions and payments (e2e)', () => {
   const createPlan = (productId: string, code: string) =>
     prisma.plan.create({ data: { productId, code, displayName: code } });
 
-  const createFeature = (
-    code: string,
-    valueType: FeatureValueType,
-    consumable = false,
-  ) =>
-    prisma.feature.create({
-      data: { code, displayName: code, valueType, unit: null, consumable },
-    });
+  const createFeature = (code: string) =>
+    prisma.feature.create({ data: { code, displayName: code } });
 
   const publish = async (
     planId: string,
@@ -61,10 +55,7 @@ describe('Subscriptions and payments (e2e)', () => {
       priceCents?: number;
       trialDays?: number;
       maxActivations?: number;
-      features?: ReadonlyArray<{
-        featureId: string;
-        value: Prisma.InputJsonValue;
-      }>;
+      features?: ReadonlyArray<{ featureId: string }>;
     } = {},
   ) => {
     await prisma.planVersion.updateMany({
@@ -94,7 +85,6 @@ describe('Subscriptions and payments (e2e)', () => {
         features: {
           create: (options.features ?? []).map((feature) => ({
             featureId: feature.featureId,
-            value: feature.value,
           })),
         },
       },
@@ -105,25 +95,19 @@ describe('Subscriptions and payments (e2e)', () => {
     const product = await createProduct();
     const standard = await createPlan(product.id, 'standard');
     const pro = await createPlan(product.id, 'pro');
-    const assistant = await createFeature('ai-assistant', 'BOOLEAN');
-    const credits = await createFeature('ai-credits', 'NUMBER', true);
+    const assistant = await createFeature('ai-assistant');
+    const credits = await createFeature('ai-credits');
 
     const standardV1 = await publish(standard.id, 1, {
       priceCents: 9900,
       trialDays: 30,
       maxActivations: 2,
-      features: [
-        { featureId: assistant.id, value: false },
-        { featureId: credits.id, value: 100 },
-      ],
+      features: [{ featureId: credits.id }],
     });
     const proV1 = await publish(pro.id, 1, {
       priceCents: 29900,
       maxActivations: 5,
-      features: [
-        { featureId: assistant.id, value: true },
-        { featureId: credits.id, value: 500 },
-      ],
+      features: [{ featureId: assistant.id }, { featureId: credits.id }],
     });
 
     return { product, standard, pro, standardV1, proV1, assistant, credits };
@@ -225,9 +209,6 @@ describe('Subscriptions and payments (e2e)', () => {
     await prisma.paymentNotification.deleteMany();
     await prisma.payment.deleteMany();
     await prisma.order.deleteMany();
-    await prisma.entitlementUsage.deleteMany();
-    await prisma.entitlementGrantItem.deleteMany();
-    await prisma.entitlementGrant.deleteMany();
     await prisma.subscriptionChange.deleteMany();
     await prisma.subscriptionPeriod.deleteMany();
     await prisma.subscription.deleteMany();
@@ -287,11 +268,7 @@ describe('Subscriptions and payments (e2e)', () => {
       currency: 'cny',
       maxActivations: 2,
     });
-    expect(subscription.body.entitlements).toEqual(
-      expect.arrayContaining([
-        { code: 'ai-credits', value: 100, limit: 100, used: 0, remaining: 100 },
-      ]),
-    );
+    expect(subscription.body.features).toEqual(['ai-credits']);
     expect(subscription.body.renewal).toMatchObject({
       source: 'PERIOD',
       version: 1,
@@ -673,6 +650,7 @@ describe('Subscriptions and payments (e2e)', () => {
       id: period.id,
       endsAt: period.endsAt,
     });
+    expect(paused.body.features).toEqual([]);
 
     const resumed = await http()
       .post(`/subscriptions/${order.subscriptionId}/resume`)
@@ -681,11 +659,7 @@ describe('Subscriptions and payments (e2e)', () => {
       .expect(200);
     expect(resumed.body.status).toBe('ACTIVE');
     expect(resumed.body.currentPeriod.id).toBe(period.id);
-
-    const grant = await prisma.entitlementGrant.findFirstOrThrow({
-      where: { subscriptionId: order.subscriptionId },
-    });
-    expect(grant.status).toBe('ACTIVE');
+    expect(resumed.body.features).toEqual(['ai-credits']);
   });
 
   it('refunds a captured payment and caps the amount', async () => {

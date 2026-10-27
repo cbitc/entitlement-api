@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { addDays, addInterval } from './period-math';
@@ -21,7 +21,6 @@ import type {
 } from './subscriptions.schemas';
 import type {
   SubscriptionChangeView,
-  SubscriptionEntitlementView,
   SubscriptionPeriodView,
   SubscriptionRenewalView,
   SubscriptionView,
@@ -119,24 +118,22 @@ const toChangeView = (
   quantity: change.targetQuantity,
 });
 
-const toEntitlements = (
+const toFeatures = (
   period: PeriodRow | null,
-): readonly SubscriptionEntitlementView[] => {
-  // A revoked or suspended grant grants nothing, even though the period row
-  // and its frozen items remain for audit. `GET /licensing/licenses` and the
-  // admin revocation both rely on this being the only source of truth.
-  if (!period?.grant || period.grant.status !== 'ACTIVE') {
+  status: SubscriptionStatus,
+): readonly string[] => {
+  // Only a running period of a live subscription grants anything. Paused and
+  // closed subscriptions keep their history, but hold no capability: the
+  // version's feature list is the whole answer, so there is nothing to revoke.
+  if (
+    !period ||
+    period.status !== 'ACTIVE' ||
+    (status !== 'TRIALING' && status !== 'ACTIVE')
+  ) {
     return [];
   }
 
-  const items = period.grant.items;
-  return items.map((item) => ({
-    code: item.feature.code,
-    value: item.value,
-    limit: item.limit,
-    used: item.used,
-    remaining: item.limit === null ? null : Math.max(0, item.limit - item.used),
-  }));
+  return period.planVersion.features.map((link) => link.feature.code).sort();
 };
 
 @Injectable()
@@ -259,7 +256,7 @@ export class SubscriptionsService {
           },
         });
 
-        await this.periods.createWithGrant(tx, {
+        await this.periods.createPeriod(tx, {
           subscriptionId: subscription.id,
           sequence: 1,
           version,
@@ -404,12 +401,6 @@ export class SubscriptionsService {
         where: { id },
         data: { status: 'PAUSED' },
       });
-      if (period.grant?.status === 'ACTIVE') {
-        await tx.entitlementGrant.update({
-          where: { id: period.grant.id },
-          data: { status: 'SUSPENDED' },
-        });
-      }
       await this.recordAppliedChange(tx, id, 'PAUSE', userId, now);
 
       return this.loadView(tx, id);
@@ -438,12 +429,6 @@ export class SubscriptionsService {
       }
 
       if (last.status === 'ACTIVE' && last.endsAt > now) {
-        if (last.grant?.status === 'SUSPENDED') {
-          await tx.entitlementGrant.update({
-            where: { id: last.grant.id },
-            data: { status: 'ACTIVE' },
-          });
-        }
         await tx.subscription.update({
           where: { id },
           data: { status: last.kind === 'TRIAL' ? 'TRIALING' : 'ACTIVE' },
@@ -453,7 +438,6 @@ export class SubscriptionsService {
           await this.periods.close(tx, last, {
             endedAt: last.endsAt,
             closeReason: 'PAUSED',
-            grantStatus: 'EXPIRED',
           });
         }
         if (!isRenewable(last.planVersion.status)) {
@@ -479,7 +463,7 @@ export class SubscriptionsService {
           );
         }
 
-        await this.periods.createWithGrant(tx, {
+        await this.periods.createPeriod(tx, {
           subscriptionId: id,
           sequence: last.sequence + 1,
           version: last.planVersion,
@@ -550,7 +534,6 @@ export class SubscriptionsService {
         await this.periods.close(tx, last, {
           endedAt: now,
           closeReason: 'CANCELED',
-          grantStatus: 'EXPIRED',
         });
       }
       await this.discardPendingChanges(tx, id);
@@ -810,7 +793,7 @@ export class SubscriptionsService {
       currentPeriod,
       renewal: toRenewalView(pending, currentPeriod),
       pendingChange: pending ? toChangeView(pending) : null,
-      entitlements: toEntitlements(period),
+      features: toFeatures(period, row.status),
     };
   }
 }

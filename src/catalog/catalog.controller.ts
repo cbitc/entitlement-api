@@ -13,7 +13,7 @@ export class CatalogController {
   @Public()
   @Get()
   @ApiOperation({
-    summary: 'Sellable products with their plans, terms and entitlements',
+    summary: 'Sellable products with their plans, terms and features',
   })
   @ApiOkResponse({
     description: 'Active products that still offer an active, priced plan',

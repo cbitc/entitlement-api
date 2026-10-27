@@ -13,12 +13,6 @@ export interface CatalogTrial {
   readonly maxActivations: number;
 }
 
-/** A capability the plan grants. `value` follows the feature's value type. */
-export interface CatalogFeature {
-  readonly code: string;
-  readonly value: unknown;
-}
-
 export interface CatalogPlan {
   readonly code: string;
   readonly displayName: string;
@@ -30,7 +24,8 @@ export interface CatalogPlan {
   readonly maxActivations: number;
   readonly trial: CatalogTrial | null;
   readonly prices: readonly CatalogPrice[];
-  readonly features: readonly CatalogFeature[];
+  /** Boolean feature codes this version includes, sorted by code. */
+  readonly features: readonly string[];
 }
 
 export interface CatalogProduct {

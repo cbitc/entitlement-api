@@ -683,7 +683,6 @@ export class OrdersService {
             await this.periods.close(tx, period, {
               endedAt: period.endsAt,
               closeReason: 'CANCELED',
-              grantStatus: 'EXPIRED',
             });
             await tx.subscriptionChange.update({
               where: { id: cancellation.id },
@@ -707,7 +706,6 @@ export class OrdersService {
           await this.periods.close(tx, period, {
             endedAt: period.endsAt,
             closeReason: 'EXPIRED',
-            grantStatus: 'EXPIRED',
           });
           await tx.subscriptionChange.updateMany({
             where: { subscriptionId: row.subscriptionId, status: 'PENDING' },

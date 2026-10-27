@@ -22,6 +22,7 @@ const issueInput = (expiresAt: Date) => ({
   product: 'ide',
   plan: 'pro',
   trial: true,
+  features: ['ai-assistant', 'code-insights'],
   machineId: 'machine-a',
   offline: false,
   expiresAt,
@@ -70,6 +71,7 @@ describe('LicenseTokenService', () => {
       product: 'ide',
       plan: 'pro',
       trial: true,
+      features: ['ai-assistant', 'code-insights'],
       machineId: 'machine-a',
       offline: true,
     });
@@ -78,15 +80,15 @@ describe('LicenseTokenService', () => {
     );
   });
 
-  it('caps the token at the grant expiry', async () => {
+  it('caps the token at the period expiry', async () => {
     const service = new LicenseTokenService(makeConfig());
     await service.onModuleInit();
 
     const now = new Date('2026-10-27T00:00:00.000Z');
-    const grantEndsAt = new Date(now.getTime() + 60_000);
-    const issued = await service.issue(issueInput(grantEndsAt), now);
+    const periodEndsAt = new Date(now.getTime() + 60_000);
+    const issued = await service.issue(issueInput(periodEndsAt), now);
 
-    expect(issued.expiresAt).toEqual(grantEndsAt);
+    expect(issued.expiresAt).toEqual(periodEndsAt);
     const jwk = service.jwks().keys[0]!;
     const { payload } = await jwtVerify(
       issued.token,
@@ -97,6 +99,6 @@ describe('LicenseTokenService', () => {
         currentDate: now,
       },
     );
-    expect(payload.exp).toBe(Math.floor(grantEndsAt.getTime() / 1000));
+    expect(payload.exp).toBe(Math.floor(periodEndsAt.getTime() / 1000));
   });
 });

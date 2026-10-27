@@ -59,11 +59,9 @@ const toCatalogPlan = (plan: PlanRow): CatalogPlan | null => {
       priceCents: price.priceCents,
       currency: price.currency,
     })),
-    features: [...version.features]
-      .sort((left, right) =>
-        left.feature.code.localeCompare(right.feature.code),
-      )
-      .map((link) => ({ code: link.feature.code, value: link.value })),
+    features: version.features
+      .map((link) => link.feature.code)
+      .sort((left, right) => left.localeCompare(right)),
   };
 };
 
