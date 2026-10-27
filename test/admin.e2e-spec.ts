@@ -9,7 +9,7 @@ import { PrismaService } from '../src/infra/prisma/prisma.service';
 /**
  * The support console end to end: publishing a version must not disturb an
  * existing subscriber, disabling an account must bite on the next request, and
- * a manual settlement must flow through the same fulfilment path as a callback.
+ * a callback payment must flow through the same fulfilment path.
  */
 describe('Admin (e2e)', () => {
   let app: NestExpressApplication;
@@ -249,7 +249,7 @@ describe('Admin (e2e)', () => {
     expect(selfDisable.body.error.type).toBe('CannotDisableSelf');
   });
 
-  it('settles an order manually, unbinds a device and ends the contract now', async () => {
+  it('fulfils a callback payment, unbinds a device and ends the contract now', async () => {
     const admin = await signIn('admin@example.com', 'ADMIN');
     const buyer = await signIn('buyer@example.com');
     await createCatalogue(admin.token);
@@ -264,25 +264,49 @@ describe('Admin (e2e)', () => {
       })
       .expect(201);
 
-    const paid = await http()
-      .post(`/admin/orders/${order.body.id}/mark-paid`)
-      .set(auth(admin.token))
+    await http()
+      .post(`/orders/${order.body.id}/payments`)
+      .set(auth(buyer.token))
       .send({})
+      .expect(200);
+
+    const callback = {
+      out_trade_no: order.body.number,
+      trade_status: 'TRADE_SUCCESS',
+      trade_no: `T-${order.body.number}`,
+      total_amount: '99.00',
+      currency: 'cny',
+      gmt_payment: new Date().toISOString(),
+    };
+
+    await http()
+      .post('/payments/alipay/notify')
+      .type('form')
+      .send({ ...callback, notify_id: `N-${order.body.id}-1` })
+      .expect(200);
+
+    const paid = await http()
+      .get(`/admin/orders/${order.body.id}`)
+      .set(auth(admin.token))
       .expect(200);
     expect(paid.body).toMatchObject({
       status: 'FULFILLED',
       kind: 'NEW_SUBSCRIPTION',
     });
     expect(paid.body.payments[0]).toMatchObject({
-      provider: 'MANUAL',
+      provider: 'ALIPAY',
       status: 'SUCCEEDED',
     });
 
-    // Repeating the call must not buy a second period.
+    // Replaying the callback must not buy a second period.
+    await http()
+      .post('/payments/alipay/notify')
+      .type('form')
+      .send({ ...callback, notify_id: `N-${order.body.id}-2` })
+      .expect(200);
     const again = await http()
-      .post(`/admin/orders/${order.body.id}/mark-paid`)
+      .get(`/admin/orders/${order.body.id}`)
       .set(auth(admin.token))
-      .send({})
       .expect(200);
     expect(again.body.subscriptionId).toBe(paid.body.subscriptionId);
     expect(await prisma.subscriptionPeriod.count()).toBe(1);

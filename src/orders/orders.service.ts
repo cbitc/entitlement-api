@@ -15,6 +15,7 @@ import type {
   ProviderPaymentStatus,
 } from '../infra/payments/payment-gateway';
 import { PrismaService } from '../infra/prisma/prisma.service';
+import { SubscriptionLifecycleService } from '../subscriptions/subscription-lifecycle.service';
 import {
   SubscriptionPeriodsService,
   VERSION_INCLUDE,
@@ -25,11 +26,7 @@ import {
 } from '../subscriptions/subscription-periods.service';
 import { OrderFulfillmentService } from './order-fulfillment.service';
 import { paymentProviderFailed } from './payment-provider.error';
-import type {
-  CreateOrderInput,
-  CreatePaymentInput,
-  RefundOrderInput,
-} from './orders.schemas';
+import type { CreateOrderInput, RefundOrderInput } from './orders.schemas';
 import type { CheckoutView, OrderView } from './orders.types';
 
 const ORDER_INCLUDE = Prisma.validator<Prisma.OrderInclude>()({
@@ -78,7 +75,6 @@ const toOrderView = (row: OrderRow): OrderView => ({
   planVersionId: row.planVersionId,
   version: row.planVersion.version,
   interval: row.interval,
-  quantity: row.quantity,
   unitPriceCents: row.unitPriceCents,
   amountCents: row.amountCents,
   currency: row.currency,
@@ -122,6 +118,7 @@ export class OrdersService {
     private readonly config: AppConfig,
     private readonly gateway: PaymentGateway,
     private readonly periods: SubscriptionPeriodsService,
+    private readonly lifecycle: SubscriptionLifecycleService,
     private readonly fulfillment: OrderFulfillmentService,
   ) {}
 
@@ -260,10 +257,9 @@ export class OrdersService {
           kind: 'NEW_SUBSCRIPTION',
           planVersionId: version.id,
           interval: input.interval,
-          quantity: input.quantity,
           unitPriceCents: price.priceCents,
           currency: price.currency,
-          amountCents: price.priceCents * input.quantity,
+          amountCents: price.priceCents,
           pendingKey: openKeyFor(userId, product.id),
           expiresAt: addMinutes(now, this.config.orderTtlMinutes),
         },
@@ -317,7 +313,6 @@ export class OrdersService {
   async createPayment(
     userId: string,
     id: string,
-    input: CreatePaymentInput,
     now = new Date(),
   ): Promise<CheckoutView> {
     const order = await this.prisma.order.findFirst({
@@ -342,13 +337,7 @@ export class OrdersService {
       throw AppException.conflict('This order has expired', 'OrderExpired');
     }
 
-    const provider = input.provider ?? this.gateway.provider;
-    if (provider !== this.gateway.provider) {
-      throw AppException.unprocessable(
-        `Payment provider ${provider} is not configured`,
-        'PaymentProviderUnavailable',
-      );
-    }
+    const provider = this.gateway.provider;
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -445,7 +434,11 @@ export class OrdersService {
     if (!order) {
       throw AppException.notFound('Order not found', 'OrderNotFound');
     }
-    if (order.status !== 'PAID' && order.status !== 'FULFILLED') {
+    if (
+      order.status !== 'PAID' &&
+      order.status !== 'FULFILLED' &&
+      order.status !== 'CLOSED'
+    ) {
       throw AppException.conflict(
         'This order has nothing to refund',
         'OrderNotRefundable',
@@ -459,12 +452,6 @@ export class OrdersService {
       throw AppException.conflict(
         'No captured payment for this order',
         'PaymentNotFound',
-      );
-    }
-    if (payment.provider !== this.gateway.provider) {
-      throw AppException.conflict(
-        `Refunds for ${payment.provider} are not configured`,
-        'PaymentProviderUnavailable',
       );
     }
 
@@ -501,24 +488,68 @@ export class OrdersService {
         reason: input.reason,
       });
 
-      await this.prisma.$transaction([
-        this.prisma.refund.update({
+      const isFull = reserved + amountCents === payment.amountCents;
+      const unfulfilled = order.appliedPeriodId === null;
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.refund.update({
           where: { id: refund.id },
           data: {
             status: 'SUCCEEDED',
             providerRefundNo: result.providerRefundNo,
             completedAt: now,
           },
-        }),
-        ...(reserved + amountCents === payment.amountCents
-          ? [
-              this.prisma.order.update({
-                where: { id: order.id },
-                data: { status: 'REFUNDED' },
-              }),
-            ]
-          : []),
-      ]);
+        });
+
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            // A refunded draft can never be fulfilled, even when only part of
+            // the money is returned: the customer did not keep the full term.
+            ...(isFull || unfulfilled ? { status: 'REFUNDED' } : {}),
+            ...(isFull || unfulfilled
+              ? { pendingKey: null, renewalKey: null }
+              : {}),
+          },
+        });
+
+        if (!isFull || !order.subscriptionId || !order.appliedPeriodId) {
+          return;
+        }
+
+        const subscription = await tx.subscription.findUnique({
+          where: { id: order.subscriptionId },
+          select: { id: true, status: true },
+        });
+        if (
+          !subscription ||
+          subscription.status === 'CANCELED' ||
+          subscription.status === 'EXPIRED'
+        ) {
+          return;
+        }
+
+        const current = await tx.subscriptionPeriod.findFirst({
+          where: {
+            subscriptionId: order.subscriptionId,
+            status: 'ACTIVE',
+          },
+          select: { id: true },
+        });
+        if (current?.id !== order.appliedPeriodId) {
+          return;
+        }
+
+        await this.lifecycle.terminate(tx, {
+          subscriptionId: order.subscriptionId,
+          status: 'CANCELED',
+          closeReason: 'CANCELED',
+          endedAt: now,
+          now,
+          actorUserId: adminUserId,
+          recordCancellation: true,
+        });
+      });
     } catch (error) {
       await this.prisma.refund.update({
         where: { id: refund.id },
@@ -615,7 +646,6 @@ export class OrdersService {
           const version: VersionRow =
             change?.targetPlanVersion ?? period.planVersion;
           const interval = change?.targetInterval ?? period.interval;
-          const quantity = change?.targetQuantity ?? period.quantity ?? 1;
           const currency = period.currency ?? 'cny';
 
           if (!isRenewable(version.status) || !interval) {
@@ -635,10 +665,9 @@ export class OrdersService {
               kind: period.kind === 'TRIAL' ? 'TRIAL_CONVERSION' : 'RENEWAL',
               planVersionId: version.id,
               interval,
-              quantity,
               unitPriceCents: price.priceCents,
               currency,
-              amountCents: price.priceCents * quantity,
+              amountCents: price.priceCents,
               sourcePeriodId: period.id,
               changeId: change?.id ?? null,
               renewalKey: period.id,
@@ -684,7 +713,9 @@ export class OrdersService {
       where: {
         status: 'ACTIVE',
         endsAt: { lte: now },
-        subscription: { status: { in: [...RENEWAL_ACTIVE_STATUSES] } },
+        subscription: {
+          status: { in: [...RENEWAL_ACTIVE_STATUSES, 'PAUSED'] },
+        },
       },
       select: { subscriptionId: true },
       take: limit,
@@ -706,7 +737,8 @@ export class OrdersService {
           if (
             !subscription ||
             (subscription.status !== 'TRIALING' &&
-              subscription.status !== 'ACTIVE')
+              subscription.status !== 'ACTIVE' &&
+              subscription.status !== 'PAUSED')
           ) {
             return 'skipped' as const;
           }
@@ -715,19 +747,6 @@ export class OrdersService {
           if (!period || period.endsAt > now) {
             return 'skipped' as const;
           }
-
-          const paid = await tx.order.findFirst({
-            where: { sourcePeriodId: period.id, status: 'PAID' },
-          });
-          if (paid) {
-            await this.fulfillment.applyRenewal(tx, paid, now);
-            return 'fulfilled' as const;
-          }
-
-          await tx.order.updateMany({
-            where: { sourcePeriodId: period.id, status: 'PENDING' },
-            data: { status: 'CLOSED', closedAt: now, renewalKey: null },
-          });
 
           const cancellation = await tx.subscriptionChange.findFirst({
             where: {
@@ -738,11 +757,49 @@ export class OrdersService {
             },
             select: { id: true },
           });
-          if (cancellation) {
-            await this.periods.close(tx, period, {
-              endedAt: period.endsAt,
-              closeReason: 'CANCELED',
+
+          // A paused subscription never auto-renews, even if an old paid
+          // renewal exists: the money is kept visible for an admin refund.
+          if (subscription.status === 'PAUSED') {
+            await tx.order.updateMany({
+              where: {
+                sourcePeriodId: period.id,
+                status: 'PAID',
+                appliedPeriodId: null,
+              },
+              data: { failureReason: 'SUBSCRIPTION_PAUSED' },
             });
+
+            if (cancellation) {
+              await tx.subscriptionChange.update({
+                where: { id: cancellation.id },
+                data: {
+                  status: 'APPLIED',
+                  pendingKey: null,
+                  appliedAt: period.endsAt,
+                },
+              });
+            }
+
+            await this.lifecycle.terminate(tx, {
+              subscriptionId: row.subscriptionId,
+              status: cancellation ? 'CANCELED' : 'EXPIRED',
+              closeReason: cancellation ? 'CANCELED' : 'PAUSED',
+              endedAt: period.endsAt,
+              now,
+            });
+            return cancellation ? ('canceled' as const) : ('expired' as const);
+          }
+
+          const paid = await tx.order.findFirst({
+            where: { sourcePeriodId: period.id, status: 'PAID' },
+          });
+          if (paid) {
+            await this.fulfillment.applyRenewal(tx, paid, now);
+            return 'fulfilled' as const;
+          }
+
+          if (cancellation) {
             await tx.subscriptionChange.update({
               where: { id: cancellation.id },
               data: {
@@ -751,21 +808,16 @@ export class OrdersService {
                 appliedAt: period.endsAt,
               },
             });
-            await tx.subscription.update({
-              where: { id: row.subscriptionId },
-              data: {
-                status: 'CANCELED',
-                endedAt: period.endsAt,
-                openKey: null,
-              },
+            await this.lifecycle.terminate(tx, {
+              subscriptionId: row.subscriptionId,
+              status: 'CANCELED',
+              closeReason: 'CANCELED',
+              endedAt: period.endsAt,
+              now,
             });
             return 'canceled' as const;
           }
 
-          await this.periods.close(tx, period, {
-            endedAt: period.endsAt,
-            closeReason: 'EXPIRED',
-          });
           await tx.subscriptionChange.updateMany({
             where: { subscriptionId: row.subscriptionId, status: 'PENDING' },
             data: {
@@ -775,13 +827,12 @@ export class OrdersService {
               failureReason: 'UNPAID',
             },
           });
-          await tx.subscription.update({
-            where: { id: row.subscriptionId },
-            data: {
-              status: 'EXPIRED',
-              endedAt: period.endsAt,
-              openKey: null,
-            },
+          await this.lifecycle.terminate(tx, {
+            subscriptionId: row.subscriptionId,
+            status: 'EXPIRED',
+            closeReason: 'EXPIRED',
+            endedAt: period.endsAt,
+            now,
           });
           return 'expired' as const;
         });
@@ -863,13 +914,10 @@ export class OrdersService {
     if (order.status === 'FULFILLED' || order.status === 'REFUNDED') {
       return this.loadView(order.id);
     }
-    if (order.status === 'CLOSED') {
-      throw AppException.conflict(
-        'This order has already been closed',
-        'OrderClosed',
-      );
-    }
 
+    // A closed order is still queried: the buyer may have paid after the
+    // checkout window. The capture path decides whether it can be fulfilled
+    // or only recorded for a refund.
     const status = await this.gateway.queryPayment(order.number);
     if (status.state === 'NOT_FOUND') {
       throw AppException.conflict(
@@ -914,69 +962,6 @@ export class OrdersService {
   }
 
   /**
-   * Manual settlement: the money arrived outside the provider (bank transfer,
-   * a comped account). It reuses the normal capture path, so the order still
-   * goes through PAID -> fulfilment and a retry cannot pay it twice.
-   */
-  async markPaid(
-    adminUserId: string,
-    id: string,
-    input: { readonly paidAt?: Date } = {},
-    now = new Date(),
-  ): Promise<OrderView> {
-    const order = await this.prisma.order.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        number: true,
-        status: true,
-        amountCents: true,
-        currency: true,
-      },
-    });
-    if (!order) {
-      throw AppException.notFound('Order not found', 'OrderNotFound');
-    }
-    if (order.status === 'FULFILLED' || order.status === 'REFUNDED') {
-      return this.loadView(order.id);
-    }
-    if (order.status === 'CLOSED') {
-      throw AppException.conflict(
-        'This order has already been closed',
-        'OrderClosed',
-      );
-    }
-
-    const outcome = await this.prisma.$transaction((tx) =>
-      this.captureAndFulfill(
-        tx,
-        order.id,
-        {
-          // Stable per order, so a retry is the same event.
-          externalId: `MANUAL-${order.id}`,
-          eventType: 'TRADE_SUCCESS',
-          orderNumber: order.number,
-          providerTradeNo: `MANUAL-${order.number}`,
-          amountCents: order.amountCents,
-          currency: order.currency,
-          paidAt: input.paidAt ?? now,
-          buyerId: `admin:${adminUserId}`,
-        },
-        now,
-        'MANUAL',
-      ),
-    );
-    if (outcome.status === 'FAILED') {
-      throw AppException.conflict(
-        'The payment could not be applied',
-        outcome.reason ?? 'PaymentNotApplied',
-      );
-    }
-
-    return this.loadView(order.id);
-  }
-
-  /**
    * Cron-friendly sweep for checkouts whose callback never arrived.
    * A captured payment is applied even if the callback is still in flight.
    */
@@ -984,8 +969,20 @@ export class OrdersService {
     now = new Date(),
     limit = 100,
   ): Promise<{ synced: number; pending: number; failed: number }> {
+    const windowStart = new Date(
+      now.getTime() - this.config.paymentSyncWindowHours * 60 * 60 * 1000,
+    );
     const rows = await this.prisma.order.findMany({
-      where: { status: 'PENDING' },
+      where: {
+        OR: [
+          { status: 'PENDING' },
+          {
+            status: 'CLOSED',
+            closedAt: { gte: windowStart },
+            payments: { none: { status: 'SUCCEEDED' } },
+          },
+        ],
+      },
       orderBy: { createdAt: 'asc' },
       take: limit,
       select: { id: true, number: true },
@@ -1153,8 +1150,40 @@ export class OrdersService {
     if (fresh.status === 'FULFILLED' || fresh.status === 'REFUNDED') {
       return { status: 'PROCESSED', reason: 'ALREADY_FULFILLED', orderId };
     }
+
     if (fresh.status === 'CLOSED') {
-      return { status: 'FAILED', reason: 'ORDER_CLOSED', orderId };
+      const closedByExpiry =
+        fresh.closedAt !== null &&
+        fresh.closedAt.getTime() >= fresh.expiresAt.getTime();
+      const withinGrace =
+        now.getTime() <=
+        fresh.expiresAt.getTime() +
+          this.config.latePaymentGraceMinutes * 60 * 1000;
+
+      // A user cancellation or an old checkout is never fulfilled: the money
+      // is recorded so an operator can refund it, and the order stays CLOSED.
+      if (!closedByExpiry || !withinGrace) {
+        const payment = await this.recordSuccess(
+          tx,
+          fresh,
+          parsed,
+          now,
+          provider,
+        );
+        await tx.order.update({
+          where: { id: fresh.id },
+          data: { failureReason: 'LATE_PAYMENT' },
+        });
+        this.logger.warn(
+          `Late payment captured for closed order ${fresh.number}; refund required`,
+        );
+        return {
+          status: 'FAILED',
+          reason: 'LATE_PAYMENT',
+          orderId: fresh.id,
+          paymentId: payment.id,
+        };
+      }
     }
 
     const payment = await this.recordSuccess(tx, fresh, parsed, now, provider);
@@ -1191,19 +1220,26 @@ export class OrdersService {
         }
       }
     } catch (error) {
-      if (error instanceof AppException) {
-        await tx.order.update({
-          where: { id: fresh.id },
-          data: { failureReason: error.type },
-        });
-        return {
-          status: 'FAILED',
-          reason: error.type,
-          orderId: fresh.id,
-          paymentId: payment.id,
-        };
+      // The money is already captured. A failed fulfilment must never roll
+      // the transaction back and hide it, otherwise no one can refund it.
+      const reason =
+        error instanceof AppException ? error.type : 'FULFILLMENT_FAILED';
+      if (!(error instanceof AppException)) {
+        this.logger.error(
+          `Fulfilment failed for paid order ${fresh.number}`,
+          error,
+        );
       }
-      throw error;
+      await tx.order.update({
+        where: { id: fresh.id },
+        data: { failureReason: reason },
+      });
+      return {
+        status: 'FAILED',
+        reason,
+        orderId: fresh.id,
+        paymentId: payment.id,
+      };
     }
 
     return {

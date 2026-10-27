@@ -51,7 +51,6 @@ export class OrderFulfillmentService {
       kind: 'PAID',
       terms: {
         interval: order.interval,
-        quantity: order.quantity,
         unitPriceCents: order.unitPriceCents,
         currency: order.currency,
         maxActivations: version.maxActivations,
@@ -117,7 +116,6 @@ export class OrderFulfillmentService {
       kind: 'PAID',
       terms: {
         interval: order.interval,
-        quantity: order.quantity,
         unitPriceCents: order.unitPriceCents,
         currency: order.currency,
         maxActivations: version.maxActivations,

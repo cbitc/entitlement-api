@@ -10,18 +10,19 @@ import type {
 import { yuanToCents } from './amount';
 
 /**
- * Development/test provider: fabricates a checkout URL and trusts callbacks.
+ * Development/test stand-in for Alipay: fabricates a checkout URL and trusts
+ * callbacks.
  *
- * It still speaks the same normalised payload shape as the real gateway, so the
- * order flow and its tests exercise the production code path rather than a
- * special case. Never selected in production — env validation enforces that.
+ * It reports the same provider as the real gateway so the order flow and tests
+ * never need a second payment channel. Never selected in production — env
+ * validation enforces the real Alipay gateway there.
  */
 export class LogPaymentGateway extends PaymentGateway {
-  readonly provider = 'MANUAL' as const;
+  readonly provider = 'ALIPAY' as const;
 
   async createPayment(request: PaymentRequest): Promise<PaymentInstruction> {
     return {
-      payUrl: `http://localhost:3000/payments/manual/checkout/${request.orderNumber}`,
+      payUrl: `http://localhost:3000/payments/alipay/checkout/${request.orderNumber}`,
       providerTradeNo: `LOG-${request.orderNumber}`,
     };
   }
@@ -54,7 +55,7 @@ export class LogPaymentGateway extends PaymentGateway {
   }
 
   async refund(request: RefundRequest): Promise<RefundResult> {
-    return { providerRefundNo: `MANUAL-${request.refundNumber}` };
+    return { providerRefundNo: `LOG-${request.refundNumber}` };
   }
 
   /** The fake provider has no remote state to query. */

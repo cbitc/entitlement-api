@@ -28,7 +28,6 @@ export type PeriodRow = Prisma.SubscriptionPeriodGetPayload<{
 
 export interface PeriodTerms {
   readonly interval: PlanInterval;
-  readonly quantity: number;
   readonly unitPriceCents: number;
   readonly currency: string;
   readonly maxActivations: number;
@@ -82,7 +81,6 @@ export class SubscriptionPeriodsService {
         status: 'ACTIVE',
         currentKey: params.subscriptionId,
         interval: params.terms.interval,
-        quantity: params.terms.quantity,
         unitPriceCents: params.terms.unitPriceCents,
         currency: params.terms.currency,
         maxActivations: params.terms.maxActivations,

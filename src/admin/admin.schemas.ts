@@ -55,11 +55,6 @@ export const adminOrderQuerySchema = paginationSchema.extend({
 
 export const adminOrderParamsSchema = z.object({ id: idSchema });
 
-export const adminMarkPaidSchema = z.object({
-  /** Defaults to now; pass the real transfer date for bookkeeping. */
-  paidAt: z.coerce.date().optional(),
-});
-
 /* Jobs ------------------------------------------------------------------- */
 
 export const adminJobParamsSchema = z.object({
@@ -169,7 +164,6 @@ export type AdminSubscriptionParams = z.output<
 >;
 export type AdminOrderQueryInput = z.output<typeof adminOrderQuerySchema>;
 export type AdminOrderParams = z.output<typeof adminOrderParamsSchema>;
-export type AdminMarkPaidInput = z.output<typeof adminMarkPaidSchema>;
 export type AdminJobParams = z.output<typeof adminJobParamsSchema>;
 export type AdminRunJobInput = z.output<typeof adminRunJobSchema>;
 export type AdminLicenseQueryInput = z.output<typeof adminLicenseQuerySchema>;

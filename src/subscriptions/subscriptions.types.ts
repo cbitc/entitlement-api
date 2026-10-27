@@ -18,7 +18,6 @@ export interface SubscriptionPeriodView {
   readonly planVersionId: string;
   readonly version: number;
   readonly interval: PlanInterval | null;
-  readonly quantity: number | null;
   readonly unitPriceCents: number | null;
   readonly currency: string | null;
   readonly maxActivations: number;
@@ -37,7 +36,6 @@ export interface SubscriptionRenewalView {
   readonly planCode: string;
   readonly version: number;
   readonly interval: PlanInterval | null;
-  readonly quantity: number | null;
   readonly effectiveAt: string;
 }
 
@@ -48,7 +46,6 @@ export interface SubscriptionChangeView {
   readonly planCode: string | null;
   readonly version: number | null;
   readonly interval: PlanInterval | null;
-  readonly quantity: number | null;
 }
 
 export interface SubscriptionView {
@@ -75,7 +72,6 @@ export interface AdminSubscriptionPeriodView {
   readonly planVersionId: string;
   readonly version: number;
   readonly interval: PlanInterval | null;
-  readonly quantity: number | null;
   readonly unitPriceCents: number | null;
   readonly currency: string | null;
   readonly maxActivations: number;

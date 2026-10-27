@@ -12,11 +12,9 @@ import { Roles } from '../common/auth/roles.decorator';
 import { ZodBody, ZodParam } from '../common/http/zod.decorators';
 import {
   createOrderSchema,
-  createPaymentSchema,
   orderParamsSchema,
   refundOrderSchema,
   type CreateOrderInput,
-  type CreatePaymentInput,
   type RefundOrderInput,
 } from './orders.schemas';
 import { OrdersService } from './orders.service';
@@ -75,9 +73,8 @@ export class OrdersController {
   pay(
     @CurrentUser() current: AuthenticatedUser,
     @ZodParam(orderParamsSchema) params: OrderParams,
-    @ZodBody(createPaymentSchema) body: CreatePaymentInput,
   ): Promise<CheckoutView> {
-    return this.orders.createPayment(current.id, params.id, body);
+    return this.orders.createPayment(current.id, params.id);
   }
 
   @Post(':id/sync')

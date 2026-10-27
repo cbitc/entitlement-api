@@ -25,7 +25,7 @@ describe('Subscriptions and payments (e2e)', () => {
   const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 
   const notify = (body: Record<string, string>) =>
-    http().post('/payments/manual/notify').type('form').send(body).expect(200);
+    http().post('/payments/alipay/notify').type('form').send(body).expect(200);
 
   const signIn = async (
     email: string,
@@ -263,7 +263,6 @@ describe('Subscriptions and payments (e2e)', () => {
       planVersionId: standardV1.id,
       version: 1,
       interval: 'MONTH',
-      quantity: 1,
       unitPriceCents: 9900,
       currency: 'cny',
       maxActivations: 2,
@@ -662,12 +661,134 @@ describe('Subscriptions and payments (e2e)', () => {
     expect(resumed.body.features).toEqual(['ai-credits']);
   });
 
+  it('never resumes an ended or cancelled subscription into a free period', async () => {
+    await seedCatalogue();
+    const buyer = await signIn('buyer@example.com');
+    const admin = await signIn('admin@example.com', 'ADMIN');
+
+    const order = await purchase(buyer.token);
+    const paused = await http()
+      .post(`/subscriptions/${order.subscriptionId}/pause`)
+      .set(auth(buyer.token))
+      .expect(200);
+    expect(paused.body.status).toBe('PAUSED');
+
+    const period = await prisma.subscriptionPeriod.findFirstOrThrow({
+      where: { subscriptionId: order.subscriptionId, status: 'ACTIVE' },
+    });
+    await prisma.subscriptionPeriod.update({
+      where: { id: period.id },
+      data: { endsAt: new Date(Date.now() - 60_000) },
+    });
+
+    const expiredResume = await http()
+      .post(`/subscriptions/${order.subscriptionId}/resume`)
+      .set(auth(buyer.token))
+      .expect(409);
+    expect(expiredResume.body.error.type).toBe('SubscriptionExpired');
+    expect(await prisma.subscriptionPeriod.count()).toBe(1);
+
+    const settled = await orders.settleDueSubscriptions(new Date());
+    expect(settled.expired).toBe(1);
+    const expired = await getSubscription(
+      buyer.token,
+      order.subscriptionId,
+    ).expect(200);
+    expect(expired.body.status).toBe('EXPIRED');
+
+    const lateResume = await http()
+      .post(`/subscriptions/${order.subscriptionId}/resume`)
+      .set(auth(buyer.token))
+      .expect(409);
+    expect(lateResume.body.error.type).toBe('SubscriptionNotActive');
+
+    const second = await purchase(buyer.token);
+    await http()
+      .post(`/admin/subscriptions/${second.subscriptionId}/cancel`)
+      .set(auth(admin.token))
+      .expect(200);
+    const cancelledResume = await http()
+      .post(`/subscriptions/${second.subscriptionId}/resume`)
+      .set(auth(buyer.token))
+      .expect(409);
+    expect(cancelledResume.body.error.type).toBe('SubscriptionNotActive');
+  });
+
+  it('records a capture after the grace window and lets an admin refund it', async () => {
+    await seedCatalogue();
+    const buyer = await signIn('buyer@example.com');
+    const admin = await signIn('admin@example.com', 'ADMIN');
+
+    const created = await createOrder(buyer.token, {}).expect(201);
+    await http()
+      .post(`/orders/${created.body.id}/payments`)
+      .set(auth(buyer.token))
+      .send({})
+      .expect(200);
+
+    await prisma.order.update({
+      where: { id: created.body.id },
+      data: { expiresAt: new Date(Date.now() - 60 * 60 * 1000) },
+    });
+    const closed = await orders.expireOrders(new Date());
+    expect(closed.closed).toBe(1);
+
+    await notify(notificationFor(created.body));
+
+    const late = await getOrder(buyer.token, created.body.id).expect(200);
+    expect(late.body.status).toBe('CLOSED');
+    expect(late.body.failureReason).toBe('LATE_PAYMENT');
+    expect(late.body.payments[0]).toMatchObject({
+      provider: 'ALIPAY',
+      status: 'SUCCEEDED',
+    });
+
+    const refunded = await http()
+      .post(`/orders/${created.body.id}/refunds`)
+      .set(auth(admin.token))
+      .send({ reason: 'late payment' })
+      .expect(200);
+    expect(refunded.body.status).toBe('REFUNDED');
+    expect(refunded.body.refundedCents).toBe(created.body.amountCents);
+    expect(await prisma.subscription.count()).toBe(0);
+  });
+
+  it('fulfils a capture just after expiry inside the grace window', async () => {
+    await seedCatalogue();
+    const buyer = await signIn('buyer@example.com');
+
+    const created = await createOrder(buyer.token, {}).expect(201);
+    await http()
+      .post(`/orders/${created.body.id}/payments`)
+      .set(auth(buyer.token))
+      .send({})
+      .expect(200);
+
+    await prisma.order.update({
+      where: { id: created.body.id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await orders.expireOrders(new Date());
+
+    await notify(notificationFor(created.body));
+
+    const paid = await getOrder(buyer.token, created.body.id).expect(200);
+    expect(paid.body.status).toBe('FULFILLED');
+    expect(paid.body.subscriptionId).toBeTruthy();
+  });
+
   it('refunds a captured payment and caps the amount', async () => {
     await seedCatalogue();
     const buyer = await signIn('buyer@example.com');
     const admin = await signIn('admin@example.com', 'ADMIN');
 
     const order = await purchase(buyer.token);
+
+    await http()
+      .post('/licensing/licenses/obtain')
+      .set(auth(buyer.token))
+      .send({ product: 'ai-platform', machineId: 'refund-machine' })
+      .expect(200);
 
     // Only an administrator may move money back.
     await http()
@@ -686,6 +807,13 @@ describe('Subscriptions and payments (e2e)', () => {
       refundedCents: 100,
     });
 
+    // A partial refund leaves the entitlement untouched.
+    await http()
+      .post('/licensing/licenses/obtain')
+      .set(auth(buyer.token))
+      .send({ product: 'ai-platform', machineId: 'refund-machine' })
+      .expect(200);
+
     const tooMuch = await http()
       .post(`/orders/${order.id}/refunds`)
       .set(auth(admin.token))
@@ -700,6 +828,25 @@ describe('Subscriptions and payments (e2e)', () => {
       .expect(200);
     expect(rest.body.status).toBe('REFUNDED');
     expect(rest.body.refundedCents).toBe(9900);
+
+    // The full refund of the order that opened the current period revokes it.
+    const blocked = await http()
+      .post('/licensing/licenses/obtain')
+      .set(auth(buyer.token))
+      .send({ product: 'ai-platform', machineId: 'refund-machine' })
+      .expect(404);
+    expect(blocked.body.error.type).toBe('NoActiveSubscription');
+
+    const canceled = await getSubscription(
+      buyer.token,
+      order.subscriptionId,
+    ).expect(200);
+    expect(canceled.body.status).toBe('CANCELED');
+
+    const activation = await prisma.deviceActivation.findFirst({
+      where: { machineId: 'refund-machine' },
+    });
+    expect(activation?.activeKey).toBeNull();
   });
 
   it('isolates orders and subscriptions by owner', async () => {
@@ -725,7 +872,7 @@ describe('Subscriptions and payments (e2e)', () => {
     await seedCatalogue();
 
     const response = await http()
-      .post('/payments/alipay/notify')
+      .post('/payments/unknown/notify')
       .type('form')
       .send({ out_trade_no: 'unknown' })
       .expect(404);

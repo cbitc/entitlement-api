@@ -19,12 +19,10 @@ import { ZodBody, ZodParam } from '../common/http/zod.decorators';
 import {
   changeSubscriptionSchema,
   createSubscriptionSchema,
-  resumeSubscriptionSchema,
   subscriptionChangeParamsSchema,
   subscriptionParamsSchema,
   type ChangeSubscriptionInput,
   type CreateSubscriptionInput,
-  type ResumeSubscriptionInput,
 } from './subscriptions.schemas';
 import { SubscriptionsService } from './subscriptions.service';
 import type { SubscriptionView } from './subscriptions.types';
@@ -71,7 +69,7 @@ export class SubscriptionsController {
   @Post(':id/changes')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Schedule a plan, interval or quantity change for the period end',
+    summary: 'Schedule a plan or interval change for the period end',
   })
   @ApiOkResponse({ description: 'The subscription with its pending change' })
   change(
@@ -116,9 +114,8 @@ export class SubscriptionsController {
   resume(
     @CurrentUser() current: AuthenticatedUser,
     @ZodParam(subscriptionParamsSchema) params: SubscriptionParams,
-    @ZodBody(resumeSubscriptionSchema) body: ResumeSubscriptionInput,
   ): Promise<SubscriptionView> {
-    return this.subscriptions.resume(current.id, params.id, body);
+    return this.subscriptions.resume(current.id, params.id);
   }
 
   @Post(':id/cancel')

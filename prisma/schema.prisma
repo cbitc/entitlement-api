@@ -335,7 +335,6 @@ model SubscriptionPeriod {
   currentKey     String?                        @unique @db.VarChar(191)
   /// Commercial terms, frozen at creation. All NULL for a TRIAL period.
   interval       PlanInterval?
-  quantity       Int?
   unitPriceCents Int?
   currency       String?                        @db.Char(3)
   /// Device limit in force for this period; a trial uses trialMaxActivations.
@@ -374,7 +373,6 @@ model SubscriptionChange {
   targetPlanVersionId String?
   targetPlanVersion   PlanVersion?             @relation(fields: [targetPlanVersionId], references: [id], onDelete: Restrict)
   targetInterval      PlanInterval?
-  targetQuantity      Int?
   /// When the intent becomes due. Change and cancel intents use the current
   /// period end, which is the only moment they may take effect.
   effectiveAt         DateTime                 @db.DateTime(3)
@@ -470,7 +468,6 @@ model Order {
   planVersion     PlanVersion           @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
   /// Commercial terms, frozen at creation.
   interval        PlanInterval
-  quantity        Int                   @default(1)
   unitPriceCents  Int
   currency        String                @db.Char(3)
   amountCents     Int
@@ -509,11 +506,10 @@ model Order {
   @@map("PaymentOrder")
 }
 
-/// `MANUAL` covers comped accounts and offline settlement; the provider is
-/// stored per attempt because a customer can retry with a different channel.
+/// The payment channel. Alipay is the only live channel; development and test
+/// substitute a log gateway rather than adding a second domain provider.
 enum PaymentProvider {
   ALIPAY
-  MANUAL
 }
 
 enum PaymentStatus {

@@ -2,7 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
 import { PrismaService } from '../infra/prisma/prisma.service';
-import { addDays, addInterval } from './period-math';
+import { addDays } from './period-math';
+import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import {
   PERIOD_INCLUDE,
   SubscriptionPeriodsService,
@@ -17,7 +18,6 @@ import {
 import type {
   ChangeSubscriptionInput,
   CreateSubscriptionInput,
-  ResumeSubscriptionInput,
 } from './subscriptions.schemas';
 import type {
   AdminSubscriptionView,
@@ -94,7 +94,6 @@ const toPeriodView = (period: PeriodRow): SubscriptionPeriodView => ({
   planVersionId: period.planVersionId,
   version: period.planVersion.version,
   interval: period.interval,
-  quantity: period.quantity,
   unitPriceCents: period.unitPriceCents,
   currency: period.currency,
   maxActivations: period.maxActivations,
@@ -118,7 +117,6 @@ const toRenewalView = (
       planCode: pending.targetPlanVersion?.plan.code ?? period?.planCode ?? '',
       version: pending.targetPlanVersion?.version ?? period?.version ?? 0,
       interval: pending.targetInterval ?? period?.interval ?? null,
-      quantity: pending.targetQuantity ?? period?.quantity ?? null,
       effectiveAt: pending.effectiveAt.toISOString(),
     };
   }
@@ -132,7 +130,6 @@ const toRenewalView = (
     planCode: period.planCode,
     version: period.version,
     interval: period.interval,
-    quantity: period.quantity,
     effectiveAt: period.endsAt,
   };
 };
@@ -146,7 +143,6 @@ const toChangeView = (
   planCode: change.targetPlanVersion?.plan.code ?? null,
   version: change.targetPlanVersion?.version ?? null,
   interval: change.targetInterval,
-  quantity: change.targetQuantity,
 });
 
 const toFeatures = (
@@ -186,7 +182,6 @@ const toAdminView = (row: AdminRow): AdminSubscriptionView => {
           planVersionId: period.planVersionId,
           version: period.planVersion.version,
           interval: period.interval,
-          quantity: period.quantity,
           unitPriceCents: period.unitPriceCents,
           currency: period.currency,
           maxActivations: period.maxActivations,
@@ -203,6 +198,7 @@ export class SubscriptionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly periods: SubscriptionPeriodsService,
+    private readonly lifecycle: SubscriptionLifecycleService,
   ) {}
 
   async listForUser(userId: string): Promise<SubscriptionView[]> {
@@ -286,8 +282,6 @@ export class SubscriptionsService {
     now = new Date(),
   ): Promise<AdminSubscriptionView> {
     return this.prisma.$transaction(async (tx) => {
-      await this.periods.lock(tx, id);
-
       const subscription = await tx.subscription.findUnique({
         where: { id },
         select: { id: true, status: true },
@@ -308,25 +302,14 @@ export class SubscriptionsService {
         );
       }
 
-      await this.closePendingOrders(tx, id);
-      await this.discardPendingChanges(tx, id);
-
-      const last = await tx.subscriptionPeriod.findFirst({
-        where: { subscriptionId: id },
-        orderBy: { sequence: 'desc' },
-        include: PERIOD_INCLUDE,
-      });
-      if (last?.status === 'ACTIVE') {
-        await this.periods.close(tx, last, {
-          endedAt: now,
-          closeReason: 'CANCELED',
-        });
-      }
-
-      await this.recordAppliedChange(tx, id, 'CANCEL', actorUserId, now);
-      await tx.subscription.update({
-        where: { id },
-        data: { status: 'CANCELED', endedAt: now, openKey: null },
+      await this.lifecycle.terminate(tx, {
+        subscriptionId: id,
+        status: 'CANCELED',
+        closeReason: 'CANCELED',
+        endedAt: now,
+        now,
+        actorUserId,
+        recordCancellation: true,
       });
 
       const row = await tx.subscription.findUniqueOrThrow({
@@ -432,10 +415,9 @@ export class SubscriptionsService {
           kind: 'TRIAL',
           terms: {
             interval: input.interval,
-            quantity: input.quantity,
             unitPriceCents: price.priceCents,
             currency: price.currency,
-            // The trial locks the price it will convert at, not just its seats.
+            // The trial locks the price it will convert at.
             maxActivations: version.trialMaxActivations,
           },
           startsAt: now,
@@ -496,7 +478,6 @@ export class SubscriptionsService {
           status: 'PENDING',
           targetPlanVersionId: target.version.id,
           targetInterval: target.terms.interval,
-          targetQuantity: target.terms.quantity,
           effectiveAt: period.endsAt,
           pendingKey: id,
           requestedByUserId: userId,
@@ -576,83 +557,44 @@ export class SubscriptionsService {
     });
   }
 
-  async resume(
-    userId: string,
-    id: string,
-    input: ResumeSubscriptionInput = {},
-  ): Promise<SubscriptionView> {
+  async resume(userId: string, id: string): Promise<SubscriptionView> {
     const now = new Date();
 
     return this.prisma.$transaction(async (tx) => {
-      await this.lockOwned(tx, userId, id);
-      const last = await tx.subscriptionPeriod.findFirst({
-        where: { subscriptionId: id },
-        orderBy: { sequence: 'desc' },
-        include: PERIOD_INCLUDE,
-      });
-      if (!last) {
+      const subscription = await this.lockOwned(tx, userId, id);
+      if (subscription.status !== 'PAUSED') {
         throw AppException.conflict(
-          'The subscription has no period to resume',
+          'Only a paused subscription can be resumed',
+          'SubscriptionNotActive',
+        );
+      }
+      if (!subscription.openKey) {
+        throw AppException.conflict(
+          'The subscription is no longer open',
           'SubscriptionNotActive',
         );
       }
 
-      if (last.status === 'ACTIVE' && last.endsAt > now) {
-        await tx.subscription.update({
-          where: { id },
-          data: { status: last.kind === 'TRIAL' ? 'TRIALING' : 'ACTIVE' },
-        });
-      } else {
-        if (last.status === 'ACTIVE') {
-          await this.periods.close(tx, last, {
-            endedAt: last.endsAt,
-            closeReason: 'PAUSED',
-          });
-        }
-        if (!isRenewable(last.planVersion.status)) {
-          throw AppException.conflict(
-            'That version can no longer be renewed; change the plan first',
-            'VersionNotRenewable',
-          );
-        }
-
-        const interval = input.interval ?? last.interval;
-        if (!interval) {
-          throw AppException.unprocessable(
-            'A billing interval is required to resume after the period ended',
-            'TermRequired',
-          );
-        }
-        const currency = last.currency ?? 'cny';
-        const price = priceFor(last.planVersion, interval, currency);
-        if (!price) {
-          throw AppException.unprocessable(
-            `This plan is not sold as ${interval} in ${currency}`,
-            'TermNotAvailable',
-          );
-        }
-
-        await this.periods.createPeriod(tx, {
-          subscriptionId: id,
-          sequence: last.sequence + 1,
-          version: last.planVersion,
-          kind: 'PAID',
-          terms: {
-            interval,
-            quantity: last.quantity ?? 1,
-            unitPriceCents: price.priceCents,
-            currency,
-            maxActivations: last.planVersion.maxActivations,
-          },
-          startsAt: now,
-          endsAt: addInterval(now, interval),
-        });
-        await tx.subscription.update({
-          where: { id },
-          data: { status: 'ACTIVE' },
-        });
+      const period = await this.periods.current(tx, id);
+      if (!period) {
+        throw AppException.conflict(
+          'The subscription has no running period',
+          'SubscriptionNotActive',
+        );
+      }
+      if (period.endsAt <= now) {
+        // Pausing does not stop the clock. A new term must be paid for, so an
+        // ended period can only be expired by settlement, never resumed free.
+        throw AppException.conflict(
+          'The paid period has already ended; start a new subscription',
+          'SubscriptionExpired',
+        );
       }
 
+      await tx.subscription.update({
+        where: { id },
+        data: { status: period.kind === 'TRIAL' ? 'TRIALING' : 'ACTIVE' },
+      });
       await this.recordAppliedChange(tx, id, 'RESUME', userId, now);
 
       return this.loadView(tx, id);
@@ -699,17 +641,14 @@ export class SubscriptionsService {
         return this.loadView(tx, id);
       }
 
-      if (last?.status === 'ACTIVE') {
-        await this.periods.close(tx, last, {
-          endedAt: now,
-          closeReason: 'CANCELED',
-        });
-      }
-      await this.discardPendingChanges(tx, id);
-      await this.recordAppliedChange(tx, id, 'CANCEL', userId, now);
-      await tx.subscription.update({
-        where: { id },
-        data: { status: 'CANCELED', endedAt: now, openKey: null },
+      await this.lifecycle.terminate(tx, {
+        subscriptionId: id,
+        status: 'CANCELED',
+        closeReason: 'CANCELED',
+        endedAt: now,
+        now,
+        actorUserId: userId,
+        recordCancellation: true,
       });
 
       return this.loadView(tx, id);
@@ -762,7 +701,6 @@ export class SubscriptionsService {
       );
     }
 
-    const quantity = input.quantity ?? period.quantity ?? 1;
     const currency = period.currency ?? 'cny';
     const price = priceFor(version, interval, currency);
     if (!price) {
@@ -776,7 +714,6 @@ export class SubscriptionsService {
       version,
       terms: {
         interval,
-        quantity,
         unitPriceCents: price.priceCents,
         currency,
         maxActivations: version.maxActivations,
@@ -799,7 +736,12 @@ export class SubscriptionsService {
     tx: Prisma.TransactionClient,
     userId: string,
     id: string,
-  ): Promise<{ id: string; productId: string; status: string }> {
+  ): Promise<{
+    id: string;
+    productId: string;
+    status: string;
+    openKey: string | null;
+  }> {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM \`Subscription\` WHERE id = ${id} FOR UPDATE
     `;
@@ -812,7 +754,7 @@ export class SubscriptionsService {
 
     const subscription = await tx.subscription.findFirst({
       where: { id, userId },
-      select: { id: true, productId: true, status: true },
+      select: { id: true, productId: true, status: true, openKey: true },
     });
     if (!subscription) {
       throw AppException.notFound(

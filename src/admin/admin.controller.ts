@@ -31,7 +31,6 @@ import {
   adminActivationParamsSchema,
   adminJobParamsSchema,
   adminLicenseQuerySchema,
-  adminMarkPaidSchema,
   adminOrderParamsSchema,
   adminOrderQuerySchema,
   adminRunJobSchema,
@@ -43,7 +42,6 @@ import {
   type AdminActivationParams,
   type AdminJobParams,
   type AdminLicenseQueryInput,
-  type AdminMarkPaidInput,
   type AdminOrderParams,
   type AdminOrderQueryInput,
   type AdminRunJobInput,
@@ -216,22 +214,6 @@ export class AdminController {
     @ZodParam(adminOrderParamsSchema) params: AdminOrderParams,
   ): Promise<OrderView> {
     return this.orders.syncAsAdmin(params.id);
-  }
-
-  @Post('orders/:id/mark-paid')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Settle an order manually and fulfil it (admin, MANUAL channel)',
-  })
-  @ApiOkResponse({ description: 'The fulfilled order' })
-  markPaid(
-    @CurrentUser() current: AuthenticatedUser,
-    @ZodParam(adminOrderParamsSchema) params: AdminOrderParams,
-    @ZodBody(adminMarkPaidSchema) body: AdminMarkPaidInput,
-  ): Promise<OrderView> {
-    return this.orders.markPaid(current.id, params.id, {
-      paidAt: body.paidAt,
-    });
   }
 
   /* Jobs ----------------------------------------------------------------- */

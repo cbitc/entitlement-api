@@ -149,6 +149,14 @@ export class AppConfig {
     return this.value('RENEWAL_LEAD_DAYS');
   }
 
+  get latePaymentGraceMinutes(): number {
+    return this.value('LATE_PAYMENT_GRACE_MINUTES');
+  }
+
+  get paymentSyncWindowHours(): number {
+    return this.value('PAYMENT_SYNC_WINDOW_HOURS');
+  }
+
   get alipay(): {
     appId: string;
     privateKey: string;

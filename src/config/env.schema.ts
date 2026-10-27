@@ -88,13 +88,27 @@ export const envSchema = z
       .min(1)
       .default('Entitlement Portal <no-reply@example.com>'),
 
-    // `log` fabricates a checkout URL and accepts unsigned callbacks: dev and
-    // test only. Production must talk to a real provider.
+    // `log` is a development/test stand-in for Alipay: it fabricates a checkout
+    // URL and accepts unsigned callbacks. Production must use the real gateway.
     PAYMENT_PROVIDER: z.enum(['log', 'alipay']).optional(),
     /** How long an unpaid checkout stays valid. */
     ORDER_TTL_MINUTES: z.coerce.number().int().positive().max(1440).default(30),
     /** How early a renewal order is created before the period ends. */
     RENEWAL_LEAD_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+    /** A payment captured just after the checkout closed is still applied. */
+    LATE_PAYMENT_GRACE_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(1440)
+      .default(30),
+    /** How far back the reconciliation sweep looks for missed captures. */
+    PAYMENT_SYNC_WINDOW_HOURS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(720)
+      .default(72),
     ALIPAY_APP_ID: z.string().default(''),
     /** PKCS#8 private key, raw base64 or full PEM. */
     ALIPAY_PRIVATE_KEY: z.string().default(''),

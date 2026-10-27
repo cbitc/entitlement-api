@@ -35,7 +35,6 @@ export interface OrderView {
   readonly planVersionId: string;
   readonly version: number;
   readonly interval: PlanInterval;
-  readonly quantity: number;
   readonly unitPriceCents: number;
   readonly amountCents: number;
   readonly currency: string;
