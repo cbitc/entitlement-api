@@ -119,8 +119,18 @@ export class JobRunnerService implements OnApplicationShutdown {
       this.pino.assign({ runId: record.id });
 
       const result = await this.execute(name, options.limit, startedAt);
-      await this.recordSuccess(record.id, startedAt, result);
-      return { runId: record.id, status: 'SUCCEEDED', result };
+      const kept = await this.finishRun(
+        name,
+        record.id,
+        startedAt,
+        result,
+        options.source,
+      );
+      return {
+        runId: kept ? record.id : null,
+        status: 'SUCCEEDED',
+        result,
+      };
     } catch (error) {
       // A failure before the row exists still has to release the lease; a
       // failure after it exists should leave a trace an operator can read.
@@ -226,6 +236,68 @@ export class JobRunnerService implements OnApplicationShutdown {
       errorMessage: row.errorMessage,
       instanceId: row.instanceId,
     }));
+  }
+
+  private async finishRun(
+    name: JobName,
+    id: string,
+    startedAt: Date,
+    result: unknown,
+    source: JobSource,
+  ): Promise<boolean> {
+    // The dispatcher ticks every 30s; a row for every empty scheduled tick
+    // would bury the runs that actually changed something. A manual run is an
+    // explicit operator action and always leaves a trace.
+    if (source === 'scheduler' && !this.hasWork(name, result)) {
+      await this.prisma.jobRun
+        .delete({ where: { id } })
+        .catch((error: unknown) => {
+          this.logger.warn(
+            { err: error, runId: id },
+            'Could not drop the history row of an empty job run',
+          );
+        });
+      this.logger.debug({ job: name, result }, 'Job run had no work');
+      return false;
+    }
+
+    await this.recordSuccess(id, startedAt, result);
+    return true;
+  }
+
+  /**
+   * Whether a run changed anything. Informational counters (a payment still
+   * pending, a renewal already ordered) do not make a run worth keeping.
+   */
+  private hasWork(name: JobName, result: unknown): boolean {
+    if (!result || typeof result !== 'object') {
+      return true;
+    }
+
+    const counters = result as Record<string, unknown>;
+    const count = (key: string): number =>
+      typeof counters[key] === 'number' ? (counters[key] as number) : 0;
+
+    switch (name) {
+      case 'renewal-orders':
+        return count('created') > 0;
+      case 'settle':
+        return (
+          count('fulfilled') +
+            count('canceled') +
+            count('expired') +
+            count('failed') >
+          0
+        );
+      case 'expire-orders':
+        return count('closed') > 0;
+      case 'sync-payments':
+        return count('synced') + count('failed') > 0;
+      case 'notifications':
+        return count('sent') + count('retried') + count('failed') > 0;
+      default:
+        return true;
+    }
   }
 
   private async recordSuccess(

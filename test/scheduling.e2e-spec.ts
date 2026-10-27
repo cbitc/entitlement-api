@@ -104,6 +104,34 @@ describe('Scheduled job runner (e2e)', () => {
     expect(succeeded.finishedAt).not.toBeNull();
   });
 
+  it('does not record an empty scheduled run', async () => {
+    const outcome = await jobs.run('settle', {
+      limit: 10,
+      source: 'scheduler',
+    });
+    expect(outcome.status).toBe('SUCCEEDED');
+    expect(outcome.runId).toBeNull();
+    expect(await prisma.jobRun.count({ where: { name: 'settle' } })).toBe(0);
+  });
+
+  it('lets only one of two concurrent acquires win without throwing', async () => {
+    const first = `${hostname()}:${process.pid}:${randomUUID()}`;
+    const second = `${hostname()}:${process.pid}:${randomUUID()}`;
+
+    const results = await Promise.all([
+      lock.acquire('settle', first, 60_000),
+      lock.acquire('settle', second, 60_000),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+
+    const lease = await lock.inspect('settle');
+    expect(lease).not.toBeNull();
+    if (lease) {
+      await lock.release('settle', lease.owner);
+    }
+    expect(await prisma.jobLock.count({ where: { name: 'settle' } })).toBe(0);
+  });
+
   it('reclaims a lease left by a dead local process and deletes it on release', async () => {
     const deadOwner = `${hostname()}:2147483647:${randomUUID()}`;
     expect(await lock.acquire('settle', deadOwner, 60_000)).toBe(true);

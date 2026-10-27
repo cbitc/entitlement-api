@@ -33,56 +33,85 @@ export class JobLockService {
   constructor(private readonly prisma: PrismaService) {}
 
   async acquire(name: string, owner: string, ttlMs: number): Promise<boolean> {
-    try {
-      return await this.prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRaw<
-          LeaseRow[]
-        >`SELECT owner, lockedUntil FROM JobLock WHERE name = ${name} FOR UPDATE`;
-
-        const now = await this.databaseNow(tx);
-
-        const existing = rows[0];
-        if (!existing) {
-          // Two processes can both see "no row"; the unique key picks a winner
-          // and the loser treats the race as "someone else has it".
-          await tx.jobLock.create({
-            data: {
-              name,
-              owner,
-              lockedUntil: new Date(now.getTime() + ttlMs),
-            },
-          });
-          return true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.tryAcquire(name, owner, ttlMs);
+      } catch (error) {
+        if (!this.isRetryable(error)) {
+          throw error;
         }
-
-        if (existing.lockedUntil.getTime() > now.getTime()) {
-          if (!this.isDeadLocalOwner(existing.owner)) {
-            return false;
-          }
-          // `nest start --watch` restarts the child without unwinding its
-          // timers; waiting out the lease there would silently pause every
-          // sweep for a minute.
-          this.logger.warn(
-            { job: name, previousOwner: existing.owner },
-            'Reclaiming a lease left by a dead local process',
+        if (attempt === 1) {
+          // Jobs are periodic and idempotent; losing one tick to contention is
+          // safer than turning it into a scheduler error.
+          this.logger.debug(
+            { job: name, err: error },
+            'Job lease contention; retrying on the next tick',
           );
+          return false;
         }
+        await delay(20 + Math.floor(Math.random() * 40));
+      }
+    }
+    return false;
+  }
 
-        await tx.jobLock.update({
-          where: { name },
-          data: {
-            owner,
-            lockedUntil: new Date(now.getTime() + ttlMs),
-          },
-        });
-        return true;
-      });
-    } catch (error) {
-      if (this.isUniqueViolation(error)) {
+  private async tryAcquire(
+    name: string,
+    owner: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
+
+    // Atomic create-if-absent. Two callers that both see "no row" can no
+    // longer both try to INSERT (which made MySQL report a deadlock); one
+    // inserts, the other's statement is ignored by the unique key.
+    // `INSERT IGNORE` reports 1 for the insert and 0 for the duplicate, which
+    // `ON DUPLICATE KEY UPDATE name = name` does not (it reports 1 for both).
+    const inserted = await this.prisma.$executeRaw`
+      INSERT IGNORE INTO JobLock (name, owner, lockedUntil, updatedAt)
+      VALUES (${name}, ${owner}, DATE_ADD(NOW(3), INTERVAL ${seconds} SECOND), NOW(3))
+    `;
+    if (inserted > 0) {
+      return true;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<
+        LeaseRow[]
+      >`SELECT owner, lockedUntil FROM JobLock WHERE name = ${name} FOR UPDATE`;
+
+      const existing = rows[0];
+      if (!existing) {
+        // The holder released it between the insert and the lock; the next
+        // tick will win the insert.
         return false;
       }
-      throw error;
-    }
+
+      const now = await this.databaseNow(tx);
+      if (existing.lockedUntil.getTime() > now.getTime()) {
+        if (!this.isDeadLocalOwner(existing.owner)) {
+          return false;
+        }
+        // `nest start --watch` restarts the child without unwinding its
+        // timers; waiting out the lease there would silently pause every
+        // sweep for a minute.
+        this.logger.warn(
+          { job: name, previousOwner: existing.owner },
+          'Reclaiming a lease left by a dead local process',
+        );
+      }
+
+      // Guard on the owner we inspected: if it changed while waiting for the
+      // row lock, someone else already took the lease.
+      const updated = await tx.jobLock.updateMany({
+        where: { name, owner: existing.owner },
+        data: {
+          owner,
+          lockedUntil: new Date(now.getTime() + ttlMs),
+        },
+      });
+      return updated.count > 0;
+    });
   }
 
   /**
@@ -146,10 +175,15 @@ export class JobLockService {
     return rows[0]?.now ?? new Date();
   }
 
-  private isUniqueViolation(error: unknown): boolean {
+  private isRetryable(error: unknown): boolean {
     return (
       error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2002'
+      // P2034: write conflict/deadlock; P2002: an older path lost the insert
+      // race. Both mean "somebody else was acquiring", not a broken job.
+      (error.code === 'P2034' || error.code === 'P2002')
     );
   }
 }
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
