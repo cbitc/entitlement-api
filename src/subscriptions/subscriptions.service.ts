@@ -20,11 +20,18 @@ import type {
   ResumeSubscriptionInput,
 } from './subscriptions.schemas';
 import type {
+  AdminSubscriptionView,
   SubscriptionChangeView,
   SubscriptionPeriodView,
   SubscriptionRenewalView,
   SubscriptionView,
 } from './subscriptions.types';
+import {
+  pageOf,
+  skipFor,
+  type Page,
+  type Pagination,
+} from '../common/http/pagination';
 
 const VIEW_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
   product: { select: { code: true } },
@@ -49,6 +56,30 @@ const VIEW_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
 });
 
 type ViewRow = Prisma.SubscriptionGetPayload<{ include: typeof VIEW_INCLUDE }>;
+
+/** Admin listing: owner, product and the running term, in one query. */
+const ADMIN_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
+  product: { select: { code: true } },
+  user: { select: { id: true, email: true } },
+  periods: {
+    where: { status: 'ACTIVE' },
+    orderBy: { sequence: 'desc' },
+    take: 1,
+    include: PERIOD_INCLUDE,
+  },
+});
+
+type AdminRow = Prisma.SubscriptionGetPayload<{
+  include: typeof ADMIN_INCLUDE;
+}>;
+
+export interface AdminSubscriptionFilter {
+  readonly userId?: string;
+  readonly productId?: string;
+  readonly status?: SubscriptionStatus;
+  readonly planVersionId?: string;
+  readonly endsBefore?: Date;
+}
 
 interface TargetTerms {
   readonly version: VersionRow;
@@ -136,6 +167,37 @@ const toFeatures = (
   return period.planVersion.features.map((link) => link.feature.code).sort();
 };
 
+const toAdminView = (row: AdminRow): AdminSubscriptionView => {
+  const period = row.periods[0];
+  return {
+    id: row.id,
+    userId: row.user.id,
+    userEmail: row.user.email,
+    productCode: row.product.code,
+    status: row.status,
+    startedAt: row.startedAt.toISOString(),
+    endedAt: row.endedAt?.toISOString() ?? null,
+    currentPeriod: period
+      ? {
+          id: period.id,
+          sequence: period.sequence,
+          kind: period.kind,
+          planCode: period.planVersion.plan.code,
+          planVersionId: period.planVersionId,
+          version: period.planVersion.version,
+          interval: period.interval,
+          quantity: period.quantity,
+          unitPriceCents: period.unitPriceCents,
+          currency: period.currency,
+          maxActivations: period.maxActivations,
+          startsAt: period.startsAt.toISOString(),
+          endsAt: period.endsAt.toISOString(),
+        }
+      : null,
+    features: toFeatures(period ?? null, row.status),
+  };
+};
+
 @Injectable()
 export class SubscriptionsService {
   constructor(
@@ -166,6 +228,113 @@ export class SubscriptionsService {
     }
 
     return this.loadView(this.prisma, id);
+  }
+
+  async listAllPaged(
+    filter: AdminSubscriptionFilter,
+    pagination: Pagination,
+  ): Promise<Page<AdminSubscriptionView>> {
+    const periodWhere: Prisma.SubscriptionPeriodWhereInput = {
+      status: 'ACTIVE',
+      ...(filter.planVersionId ? { planVersionId: filter.planVersionId } : {}),
+      ...(filter.endsBefore ? { endsAt: { lte: filter.endsBefore } } : {}),
+    };
+    const where: Prisma.SubscriptionWhereInput = {
+      ...(filter.userId ? { userId: filter.userId } : {}),
+      ...(filter.productId ? { productId: filter.productId } : {}),
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.planVersionId || filter.endsBefore
+        ? { periods: { some: periodWhere } }
+        : {}),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.subscription.findMany({
+        where,
+        orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+        skip: skipFor(pagination),
+        take: pagination.limit,
+        include: ADMIN_INCLUDE,
+      }),
+      this.prisma.subscription.count({ where }),
+    ]);
+
+    return pageOf(rows.map(toAdminView), total, pagination);
+  }
+
+  async getAny(id: string): Promise<AdminSubscriptionView> {
+    const row = await this.prisma.subscription.findUnique({
+      where: { id },
+      include: ADMIN_INCLUDE,
+    });
+    if (!row) {
+      throw AppException.notFound(
+        'Subscription not found',
+        'SubscriptionNotFound',
+      );
+    }
+    return toAdminView(row);
+  }
+
+  /**
+   * Support action: end the contract now instead of at the period boundary.
+   * The paid-but-unused time is a refund decision, deliberately not made here.
+   */
+  async cancelImmediately(
+    actorUserId: string,
+    id: string,
+    now = new Date(),
+  ): Promise<AdminSubscriptionView> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.periods.lock(tx, id);
+
+      const subscription = await tx.subscription.findUnique({
+        where: { id },
+        select: { id: true, status: true },
+      });
+      if (!subscription) {
+        throw AppException.notFound(
+          'Subscription not found',
+          'SubscriptionNotFound',
+        );
+      }
+      if (
+        subscription.status === 'CANCELED' ||
+        subscription.status === 'EXPIRED'
+      ) {
+        throw AppException.conflict(
+          'The subscription has already ended',
+          'SubscriptionNotActive',
+        );
+      }
+
+      await this.closePendingOrders(tx, id);
+      await this.discardPendingChanges(tx, id);
+
+      const last = await tx.subscriptionPeriod.findFirst({
+        where: { subscriptionId: id },
+        orderBy: { sequence: 'desc' },
+        include: PERIOD_INCLUDE,
+      });
+      if (last?.status === 'ACTIVE') {
+        await this.periods.close(tx, last, {
+          endedAt: now,
+          closeReason: 'CANCELED',
+        });
+      }
+
+      await this.recordAppliedChange(tx, id, 'CANCEL', actorUserId, now);
+      await tx.subscription.update({
+        where: { id },
+        data: { status: 'CANCELED', endedAt: now, openKey: null },
+      });
+
+      const row = await tx.subscription.findUniqueOrThrow({
+        where: { id },
+        include: ADMIN_INCLUDE,
+      });
+      return toAdminView(row);
+    });
   }
 
   /**

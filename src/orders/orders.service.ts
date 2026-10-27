@@ -1,7 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, type Order } from '@prisma/client';
+import { Prisma, type Order, type PaymentProvider } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { AppException } from '../common/errors/app.exception';
+import {
+  pageOf,
+  skipFor,
+  type Page,
+  type Pagination,
+} from '../common/http/pagination';
 import { AppConfig } from '../config/app-config.service';
 import { PaymentGateway } from '../infra/payments/payment-gateway';
 import type {
@@ -42,6 +48,15 @@ const ORDER_NUMBER_PREFIX = 'ORD';
 const RENEWAL_ACTIVE_STATUSES = ['TRIALING', 'ACTIVE'] as const;
 /** Provider statuses that mean the money was captured. */
 const CAPTURED_EVENTS = new Set(['TRADE_SUCCESS', 'TRADE_FINISHED']);
+
+export interface AdminOrderFilter {
+  readonly status?: Order['status'];
+  readonly userId?: string;
+  readonly number?: string;
+  readonly productId?: string;
+  readonly from?: Date;
+  readonly to?: Date;
+}
 
 const newOrderNumber = (): string =>
   `${ORDER_NUMBER_PREFIX}${Date.now().toString(36).toUpperCase()}${randomBytes(
@@ -126,6 +141,50 @@ export class OrdersService {
       select: { id: true },
     });
     if (!owned) {
+      throw AppException.notFound('Order not found', 'OrderNotFound');
+    }
+    return this.loadView(id);
+  }
+
+  async listAllPaged(
+    filter: AdminOrderFilter,
+    pagination: Pagination,
+  ): Promise<Page<OrderView>> {
+    const where: Prisma.OrderWhereInput = {
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.userId ? { userId: filter.userId } : {}),
+      ...(filter.number ? { number: filter.number } : {}),
+      ...(filter.productId ? { productId: filter.productId } : {}),
+      ...(filter.from || filter.to
+        ? {
+            createdAt: {
+              ...(filter.from ? { gte: filter.from } : {}),
+              ...(filter.to ? { lte: filter.to } : {}),
+            },
+          }
+        : {}),
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.order.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: skipFor(pagination),
+        take: pagination.limit,
+        include: ORDER_INCLUDE,
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+
+    return pageOf(rows.map(toOrderView), total, pagination);
+  }
+
+  async getAny(id: string): Promise<OrderView> {
+    const exists = await this.prisma.order.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) {
       throw AppException.notFound('Order not found', 'OrderNotFound');
     }
     return this.loadView(id);
@@ -780,9 +839,22 @@ export class OrdersService {
    * Callbacks can be lost or unreachable (a local sandbox cannot be called
    * back), so the provider is asked directly and the same capture path is used.
    */
-  async sync(userId: string, id: string, now = new Date()): Promise<OrderView> {
+  sync(userId: string, id: string, now = new Date()): Promise<OrderView> {
+    return this.reconcile(id, now, userId);
+  }
+
+  /** Support-triggered reconciliation: same path, no ownership filter. */
+  syncAsAdmin(id: string, now = new Date()): Promise<OrderView> {
+    return this.reconcile(id, now, null);
+  }
+
+  private async reconcile(
+    id: string,
+    now: Date,
+    ownerUserId: string | null,
+  ): Promise<OrderView> {
     const order = await this.prisma.order.findFirst({
-      where: { id, userId },
+      where: { id, ...(ownerUserId ? { userId: ownerUserId } : {}) },
       select: { id: true, number: true, status: true },
     });
     if (!order) {
@@ -836,6 +908,69 @@ export class OrdersService {
             'The payment could not be applied',
             outcome.reason ?? 'PaymentNotApplied',
           );
+    }
+
+    return this.loadView(order.id);
+  }
+
+  /**
+   * Manual settlement: the money arrived outside the provider (bank transfer,
+   * a comped account). It reuses the normal capture path, so the order still
+   * goes through PAID -> fulfilment and a retry cannot pay it twice.
+   */
+  async markPaid(
+    adminUserId: string,
+    id: string,
+    input: { readonly paidAt?: Date } = {},
+    now = new Date(),
+  ): Promise<OrderView> {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        amountCents: true,
+        currency: true,
+      },
+    });
+    if (!order) {
+      throw AppException.notFound('Order not found', 'OrderNotFound');
+    }
+    if (order.status === 'FULFILLED' || order.status === 'REFUNDED') {
+      return this.loadView(order.id);
+    }
+    if (order.status === 'CLOSED') {
+      throw AppException.conflict(
+        'This order has already been closed',
+        'OrderClosed',
+      );
+    }
+
+    const outcome = await this.prisma.$transaction((tx) =>
+      this.captureAndFulfill(
+        tx,
+        order.id,
+        {
+          // Stable per order, so a retry is the same event.
+          externalId: `MANUAL-${order.id}`,
+          eventType: 'TRADE_SUCCESS',
+          orderNumber: order.number,
+          providerTradeNo: `MANUAL-${order.number}`,
+          amountCents: order.amountCents,
+          currency: order.currency,
+          paidAt: input.paidAt ?? now,
+          buyerId: `admin:${adminUserId}`,
+        },
+        now,
+        'MANUAL',
+      ),
+    );
+    if (outcome.status === 'FAILED') {
+      throw AppException.conflict(
+        'The payment could not be applied',
+        outcome.reason ?? 'PaymentNotApplied',
+      );
     }
 
     return this.loadView(order.id);
@@ -989,6 +1124,7 @@ export class OrdersService {
     orderId: string,
     parsed: PaymentNotificationPayload,
     now: Date,
+    provider: PaymentProvider = this.gateway.provider,
   ): Promise<{
     status: 'PROCESSED' | 'FAILED';
     reason: string | null;
@@ -1021,7 +1157,7 @@ export class OrdersService {
       return { status: 'FAILED', reason: 'ORDER_CLOSED', orderId };
     }
 
-    const payment = await this.recordSuccess(tx, fresh, parsed, now);
+    const payment = await this.recordSuccess(tx, fresh, parsed, now, provider);
 
     await tx.order.update({
       where: { id: fresh.id },
@@ -1083,6 +1219,7 @@ export class OrdersService {
     order: Order,
     parsed: PaymentNotificationPayload,
     now: Date,
+    provider: PaymentProvider,
   ): Promise<{ id: string }> {
     const captured = await tx.payment.findFirst({
       where: { orderId: order.id, status: 'SUCCEEDED' },
@@ -1122,7 +1259,7 @@ export class OrdersService {
     return tx.payment.create({
       data: {
         orderId: order.id,
-        provider: this.gateway.provider,
+        provider,
         ...data,
       },
       select: { id: true },

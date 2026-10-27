@@ -2,6 +2,7 @@ import type { SubscriptionStatus } from '@prisma/client';
 
 /** One machine currently holding an activation slot. */
 export interface LicenseActivationView {
+  readonly id: string;
   readonly machineId: string;
   readonly activatedAt: string;
   readonly lastRefreshedAt: string;
@@ -37,7 +38,14 @@ export interface LicenseListResponse {
   readonly licenses: readonly LicenseView[];
 }
 
-export interface AdminLicenseListResponse {
-  readonly email: string;
-  readonly licenses: readonly LicenseView[];
+/** A license plus its owner, for the support console. */
+export interface AdminLicenseView extends LicenseView {
+  readonly userId: string;
+  readonly userEmail: string;
+}
+
+export interface AdminLicenseFilter {
+  readonly email?: string;
+  readonly userId?: string;
+  readonly product?: string;
 }

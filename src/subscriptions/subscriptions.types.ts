@@ -65,3 +65,33 @@ export interface SubscriptionView {
    */
   readonly features: readonly string[];
 }
+
+/** One running term as the admin views it: enough to reason about, no history. */
+export interface AdminSubscriptionPeriodView {
+  readonly id: string;
+  readonly sequence: number;
+  readonly kind: SubscriptionPeriodKind;
+  readonly planCode: string;
+  readonly planVersionId: string;
+  readonly version: number;
+  readonly interval: PlanInterval | null;
+  readonly quantity: number | null;
+  readonly unitPriceCents: number | null;
+  readonly currency: string | null;
+  readonly maxActivations: number;
+  readonly startsAt: string;
+  readonly endsAt: string;
+}
+
+/** A subscription plus its owner, for the support console. */
+export interface AdminSubscriptionView {
+  readonly id: string;
+  readonly userId: string;
+  readonly userEmail: string;
+  readonly productCode: string;
+  readonly status: SubscriptionStatus;
+  readonly startedAt: string;
+  readonly endedAt: string | null;
+  readonly currentPeriod: AdminSubscriptionPeriodView | null;
+  readonly features: readonly string[];
+}

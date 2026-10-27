@@ -287,22 +287,23 @@ describe('Licensing (e2e)', () => {
     await obtain(token, 'machine-a').expect(200);
 
     await http()
-      .get(`/licensing/admin/licenses?email=${encodeURIComponent(user.email)}`)
+      .get(`/admin/licenses?email=${encodeURIComponent(user.email)}`)
       .set(auth(token))
       .expect(403);
 
     const listed = await http()
-      .get(`/licensing/admin/licenses?email=${encodeURIComponent(user.email)}`)
+      .get(`/admin/licenses?email=${encodeURIComponent(user.email)}`)
       .set(auth(admin.token))
       .expect(200);
-    expect(listed.body.email).toBe(user.email);
-    expect(listed.body.licenses).toHaveLength(1);
-    expect(listed.body.licenses[0]).toMatchObject({
+    expect(listed.body.total).toBe(1);
+    expect(listed.body.items).toHaveLength(1);
+    expect(listed.body.items[0]).toMatchObject({
+      userEmail: user.email,
       product: 'licensing-product',
       plan: 'standard',
       features: ['ai-assistant', 'code-insights'],
     });
-    expect(listed.body.licenses[0].activations).toHaveLength(1);
+    expect(listed.body.items[0].activations).toHaveLength(1);
   });
 
   it('validates the request body and reports unknown products', async () => {

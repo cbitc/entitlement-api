@@ -17,21 +17,14 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../common/auth/authenticated-user';
 import { Public } from '../common/auth/public.decorator';
-import { Roles } from '../common/auth/roles.decorator';
-import { ZodBody, ZodQuery } from '../common/http/zod.decorators';
+import { ZodBody } from '../common/http/zod.decorators';
 import { LicenseTokenService } from './license-token.service';
 import {
-  adminLicenseQuerySchema,
   licenseMachineSchema,
-  type AdminLicenseQuery,
   type LicenseMachineInput,
 } from './licensing.schemas';
 import { LicensingService } from './licensing.service';
-import type {
-  AdminLicenseListResponse,
-  LicenseListResponse,
-  LicenseTokenView,
-} from './licensing.types';
+import type { LicenseListResponse, LicenseTokenView } from './licensing.types';
 
 @ApiTags('licensing')
 @ApiBearerAuth('session')
@@ -83,16 +76,6 @@ export class LicensingController {
     @CurrentUser() current: AuthenticatedUser,
   ): Promise<LicenseListResponse> {
     return this.licensing.listForUser(current.id);
-  }
-
-  @Get('admin/licenses')
-  @Roles('ADMIN')
-  @ApiOperation({ summary: 'List every license of one account (admin)' })
-  @ApiOkResponse({ description: 'The account licenses and activations' })
-  adminList(
-    @ZodQuery(adminLicenseQuerySchema) query: AdminLicenseQuery,
-  ): Promise<AdminLicenseListResponse> {
-    return this.licensing.adminList(query.email);
   }
 }
 

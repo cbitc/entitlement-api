@@ -1,11 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
+import {
+  pageOf,
+  skipFor,
+  type Page,
+  type Pagination,
+} from '../common/http/pagination';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { LicenseTokenService } from './license-token.service';
 import type { LicenseMachineInput } from './licensing.schemas';
 import type {
-  AdminLicenseListResponse,
+  AdminLicenseFilter,
+  AdminLicenseView,
   LicenseListResponse,
   LicenseTokenView,
   LicenseView,
@@ -39,6 +46,7 @@ const LICENSE_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
     where: { activeKey: { not: null } },
     orderBy: { activatedAt: 'asc' },
     select: {
+      id: true,
       machineId: true,
       activatedAt: true,
       lastRefreshedAt: true,
@@ -48,6 +56,16 @@ const LICENSE_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
 
 type LicenseRow = Prisma.SubscriptionGetPayload<{
   include: typeof LICENSE_INCLUDE;
+}>;
+
+/** The admin projection adds the owner; nothing else about the license changes. */
+const ADMIN_LICENSE_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
+  ...LICENSE_INCLUDE,
+  user: { select: { id: true, email: true } },
+});
+
+type AdminLicenseRow = Prisma.SubscriptionGetPayload<{
+  include: typeof ADMIN_LICENSE_INCLUDE;
 }>;
 
 type LicensePeriod = LicenseRow['periods'][number];
@@ -68,6 +86,7 @@ const noActiveSubscription = (): AppException =>
 const toActivationView = (
   activation: LicenseRow['activations'][number],
 ): LicenseView['activations'][number] => ({
+  id: activation.id,
   machineId: activation.machineId,
   activatedAt: activation.activatedAt.toISOString(),
   lastRefreshedAt: activation.lastRefreshedAt.toISOString(),
@@ -232,29 +251,76 @@ export class LicensingService {
     };
   }
 
-  async adminList(email: string): Promise<AdminLicenseListResponse> {
+  async adminList(
+    filter: AdminLicenseFilter,
+    pagination: Pagination,
+    now: Date = new Date(),
+  ): Promise<Page<AdminLicenseView>> {
+    const userId = await this.resolveAdminUser(filter);
+    const where: Prisma.SubscriptionWhereInput = {
+      ...(userId ? { userId } : {}),
+      ...(filter.product ? { product: { code: filter.product } } : {}),
+      status: { in: [...VISIBLE_STATUSES] },
+      openKey: { not: null },
+      // Ends the license the moment its period does, without post-filtering
+      // a page (which would make `total` lie).
+      periods: { some: { status: 'ACTIVE', endsAt: { gt: now } } },
+    };
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.subscription.findMany({
+        where,
+        orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+        skip: skipFor(pagination),
+        take: pagination.limit,
+        include: ADMIN_LICENSE_INCLUDE,
+      }),
+      this.prisma.subscription.count({ where }),
+    ]);
+
+    return pageOf(rows.map(toAdminLicenseView), total, pagination);
+  }
+
+  /** Support unbinding: the user lost a machine and cannot release the slot. */
+  async deactivateAsAdmin(
+    activationId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    const activation = await this.prisma.deviceActivation.findUnique({
+      where: { id: activationId },
+      select: { id: true, activeKey: true },
+    });
+    if (!activation || !activation.activeKey) {
+      throw AppException.notFound(
+        'No active activation matches this id',
+        'ActivationNotFound',
+      );
+    }
+
+    await this.prisma.deviceActivation.update({
+      where: { id: activationId },
+      data: { activeKey: null, deactivatedAt: now },
+    });
+  }
+
+  private async resolveAdminUser(
+    filter: AdminLicenseFilter,
+  ): Promise<string | undefined> {
+    if (filter.userId) {
+      return filter.userId;
+    }
+    if (!filter.email) {
+      return undefined;
+    }
+
     const user = await this.prisma.user.findUnique({
-      where: { email },
-      select: { id: true, email: true },
+      where: { email: filter.email },
+      select: { id: true },
     });
     if (!user) {
       throw AppException.notFound('User not found', 'UserNotFound');
     }
-
-    const rows = await this.prisma.subscription.findMany({
-      where: {
-        userId: user.id,
-        status: { in: [...VISIBLE_STATUSES] },
-        openKey: { not: null },
-      },
-      orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
-      include: LICENSE_INCLUDE,
-    });
-
-    return {
-      email: user.email,
-      licenses: rows.filter(isVisibleLicense).map(toLicenseView),
-    };
+    return user.id;
   }
 
   private findSubscription(
@@ -303,6 +369,12 @@ const toLicenseView = (row: LicenseRow): LicenseView => {
     activations: row.activations.map(toActivationView),
   };
 };
+
+const toAdminLicenseView = (row: AdminLicenseRow): AdminLicenseView => ({
+  ...toLicenseView(row),
+  userId: row.user.id,
+  userEmail: row.user.email,
+});
 
 /**
  * An ended period is history, not a license the caller still holds. Paused
