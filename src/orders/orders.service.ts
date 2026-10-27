@@ -28,7 +28,7 @@ import {
 import { OrderFulfillmentService } from './order-fulfillment.service';
 import { paymentProviderFailed } from './payment-provider.error';
 import type { CreateOrderInput, RefundOrderInput } from './orders.schemas';
-import type { CheckoutView, OrderView } from './orders.types';
+import type { AdminOrderView, CheckoutView, OrderView } from './orders.types';
 
 const ORDER_INCLUDE = Prisma.validator<Prisma.OrderInclude>()({
   product: { select: { code: true } },
@@ -41,6 +41,16 @@ const ORDER_INCLUDE = Prisma.validator<Prisma.OrderInclude>()({
 });
 
 type OrderRow = Prisma.OrderGetPayload<{ include: typeof ORDER_INCLUDE }>;
+
+/** Admin rows also name the buyer; the customer view never needs it. */
+const ADMIN_ORDER_INCLUDE = Prisma.validator<Prisma.OrderInclude>()({
+  ...ORDER_INCLUDE,
+  user: { select: { id: true, email: true } },
+});
+
+type AdminOrderRow = Prisma.OrderGetPayload<{
+  include: typeof ADMIN_ORDER_INCLUDE;
+}>;
 
 const ORDER_NUMBER_PREFIX = 'ORD';
 const RENEWAL_ACTIVE_STATUSES = ['TRIALING', 'ACTIVE'] as const;
@@ -110,6 +120,12 @@ const toOrderView = (row: OrderRow): OrderView => ({
   })),
 });
 
+const toAdminOrderView = (row: AdminOrderRow): AdminOrderView => ({
+  ...toOrderView(row),
+  userId: row.user.id,
+  userEmail: row.user.email,
+});
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
@@ -148,7 +164,7 @@ export class OrdersService {
   async listAllPaged(
     filter: AdminOrderFilter,
     pagination: Pagination,
-  ): Promise<Page<OrderView>> {
+  ): Promise<Page<AdminOrderView>> {
     const where: Prisma.OrderWhereInput = {
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.userId ? { userId: filter.userId } : {}),
@@ -170,15 +186,15 @@ export class OrdersService {
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: skipFor(pagination),
         take: pagination.limit,
-        include: ORDER_INCLUDE,
+        include: ADMIN_ORDER_INCLUDE,
       }),
       this.prisma.order.count({ where }),
     ]);
 
-    return pageOf(rows.map(toOrderView), total, pagination);
+    return pageOf(rows.map(toAdminOrderView), total, pagination);
   }
 
-  async getAny(id: string): Promise<OrderView> {
+  async getAny(id: string): Promise<AdminOrderView> {
     const exists = await this.prisma.order.findUnique({
       where: { id },
       select: { id: true },
@@ -186,7 +202,7 @@ export class OrdersService {
     if (!exists) {
       throw AppException.notFound('Order not found', 'OrderNotFound');
     }
-    return this.loadView(id);
+    return this.loadAdminView(id);
   }
 
   /** Creates an unpaid checkout. Nothing is granted until the callback lands. */
@@ -428,7 +444,7 @@ export class OrdersService {
     orderId: string,
     input: RefundOrderInput,
     now = new Date(),
-  ): Promise<OrderView> {
+  ): Promise<AdminOrderView> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: { payments: true, refunds: true },
@@ -565,7 +581,7 @@ export class OrdersService {
       throw paymentProviderFailed('The refund was rejected by the provider');
     }
 
-    return this.loadView(order.id);
+    return this.loadAdminView(order.id);
   }
 
   /**
@@ -899,8 +915,9 @@ export class OrdersService {
   }
 
   /** Support-triggered reconciliation: same path, no ownership filter. */
-  syncAsAdmin(id: string, now = new Date()): Promise<OrderView> {
-    return this.reconcile(id, now, null);
+  async syncAsAdmin(id: string, now = new Date()): Promise<AdminOrderView> {
+    await this.reconcile(id, now, null);
+    return this.getAny(id);
   }
 
   private async reconcile(
@@ -1364,6 +1381,17 @@ export class OrdersService {
       throw AppException.notFound('Order not found', 'OrderNotFound');
     }
     return toOrderView(row);
+  }
+
+  private async loadAdminView(id: string): Promise<AdminOrderView> {
+    const row = await this.prisma.order.findUnique({
+      where: { id },
+      include: ADMIN_ORDER_INCLUDE,
+    });
+    if (!row) {
+      throw AppException.notFound('Order not found', 'OrderNotFound');
+    }
+    return toAdminOrderView(row);
   }
 
   private publishedVersion(planId: string): Promise<VersionRow | null> {

@@ -59,13 +59,26 @@ type ViewRow = Prisma.SubscriptionGetPayload<{ include: typeof VIEW_INCLUDE }>;
 
 /** Admin listing: owner, product and the running term, in one query. */
 const ADMIN_INCLUDE = Prisma.validator<Prisma.SubscriptionInclude>()({
-  product: { select: { code: true } },
+  product: { select: { id: true, code: true } },
   user: { select: { id: true, email: true } },
   periods: {
     where: { status: 'ACTIVE' },
     orderBy: { sequence: 'desc' },
     take: 1,
     include: PERIOD_INCLUDE,
+  },
+  changes: {
+    where: { status: 'PENDING' },
+    take: 1,
+    include: {
+      targetPlanVersion: {
+        select: {
+          id: true,
+          version: true,
+          plan: { select: { code: true } },
+        },
+      },
+    },
   },
 });
 
@@ -165,10 +178,31 @@ const toFeatures = (
 
 const toAdminView = (row: AdminRow): AdminSubscriptionView => {
   const period = row.periods[0];
+  const periodView: SubscriptionPeriodView | null = period
+    ? {
+        id: period.id,
+        sequence: period.sequence,
+        kind: period.kind,
+        planCode: period.planVersion.plan.code,
+        planVersionId: period.planVersionId,
+        version: period.planVersion.version,
+        interval: period.interval,
+        unitPriceCents: period.unitPriceCents,
+        currency: period.currency,
+        maxActivations: period.maxActivations,
+        startsAt: period.startsAt.toISOString(),
+        endsAt: period.endsAt.toISOString(),
+        endedAt: period.endedAt?.toISOString() ?? null,
+        closeReason: period.closeReason,
+      }
+    : null;
+  const pending = row.changes[0] ?? null;
+
   return {
     id: row.id,
     userId: row.user.id,
     userEmail: row.user.email,
+    productId: row.product.id,
     productCode: row.product.code,
     status: row.status,
     startedAt: row.startedAt.toISOString(),
@@ -189,6 +223,8 @@ const toAdminView = (row: AdminRow): AdminSubscriptionView => {
           endsAt: period.endsAt.toISOString(),
         }
       : null,
+    renewal: toRenewalView(pending, periodView),
+    pendingChange: pending ? toChangeView(pending) : null,
     features: toFeatures(period ?? null, row.status),
   };
 };

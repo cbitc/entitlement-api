@@ -18,7 +18,7 @@ import {
   type RefundOrderInput,
 } from './orders.schemas';
 import { OrdersService } from './orders.service';
-import type { CheckoutView, OrderView } from './orders.types';
+import type { AdminOrderView, CheckoutView, OrderView } from './orders.types';
 
 type OrderParams = { readonly id: string };
 
@@ -99,7 +99,7 @@ export class OrdersController {
     @CurrentUser() current: AuthenticatedUser,
     @ZodParam(orderParamsSchema) params: OrderParams,
     @ZodBody(refundOrderSchema) body: RefundOrderInput,
-  ): Promise<OrderView> {
+  ): Promise<AdminOrderView> {
     return this.orders.refund(current.id, params.id, body);
   }
 }

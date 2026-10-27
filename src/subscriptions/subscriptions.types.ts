@@ -84,10 +84,15 @@ export interface AdminSubscriptionView {
   readonly id: string;
   readonly userId: string;
   readonly userEmail: string;
+  readonly productId: string;
   readonly productCode: string;
   readonly status: SubscriptionStatus;
   readonly startedAt: string;
   readonly endedAt: string | null;
   readonly currentPeriod: AdminSubscriptionPeriodView | null;
+  /** What renews next, including a scheduled change. Null when canceled. */
+  readonly renewal: SubscriptionRenewalView | null;
+  /** The outstanding intent, so support can see a scheduled cancel/change. */
+  readonly pendingChange: SubscriptionChangeView | null;
   readonly features: readonly string[];
 }

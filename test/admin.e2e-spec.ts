@@ -178,6 +178,47 @@ describe('Admin (e2e)', () => {
     expect(catalog.body.products[0].plans[0].planVersionId).toBe(next.body.id);
   });
 
+  it('shows the buyer and a scheduled cancellation on the admin views', async () => {
+    const admin = await signIn('admin@example.com', 'ADMIN');
+    const buyer = await signIn('buyer@example.com');
+    await createCatalogue(admin.token);
+
+    const trial = await http()
+      .post('/subscriptions')
+      .set(auth(buyer.token))
+      .send({
+        productCode: 'admin-product',
+        planCode: 'standard',
+        interval: 'MONTH',
+        trial: true,
+      })
+      .expect(201);
+
+    await http()
+      .post(`/subscriptions/${trial.body.id}/cancel`)
+      .set(auth(buyer.token))
+      .expect(200);
+
+    const view = await http()
+      .get(`/admin/subscriptions/${trial.body.id}`)
+      .set(auth(admin.token))
+      .expect(200);
+    expect(view.body).toMatchObject({
+      userId: buyer.user.id,
+      userEmail: 'buyer@example.com',
+      pendingChange: { kind: 'CANCEL' },
+      renewal: null,
+    });
+    expect(typeof view.body.productId).toBe('string');
+
+    const page = await http()
+      .get('/admin/subscriptions')
+      .query({ userId: buyer.user.id })
+      .set(auth(admin.token))
+      .expect(200);
+    expect(page.body.items[0].userEmail).toBe('buyer@example.com');
+  });
+
   it('enforces the version state machine', async () => {
     const admin = await signIn('admin@example.com', 'ADMIN');
     const { plan, published } = await createCatalogue(admin.token);
@@ -295,6 +336,8 @@ describe('Admin (e2e)', () => {
     expect(paid.body).toMatchObject({
       status: 'FULFILLED',
       kind: 'NEW_SUBSCRIPTION',
+      userId: buyer.user.id,
+      userEmail: 'buyer@example.com',
     });
     expect(paid.body.payments[0]).toMatchObject({
       provider: 'ALIPAY',

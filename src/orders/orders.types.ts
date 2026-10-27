@@ -60,3 +60,15 @@ export interface CheckoutView {
   };
   readonly payUrl: string;
 }
+
+/**
+ * The order as the support console sees it.
+ *
+ * The customer view deliberately omits the buyer: an owner already knows who
+ * they are, while an operator has to answer "whose order is this?" before
+ * touching a refund.
+ */
+export interface AdminOrderView extends OrderView {
+  readonly userId: string;
+  readonly userEmail: string;
+}

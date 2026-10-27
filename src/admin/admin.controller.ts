@@ -25,7 +25,7 @@ import type { AdminLicenseView } from '../licensing/licensing.types';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { AdminNotificationView } from '../notifications/notifications.types';
 import { OrdersService } from '../orders/orders.service';
-import type { OrderView } from '../orders/orders.types';
+import type { AdminOrderView } from '../orders/orders.types';
 import { JobRunnerService } from '../scheduling/job-runner.service';
 import type { JobRunView } from '../scheduling/job.types';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
@@ -195,7 +195,7 @@ export class AdminController {
   @ApiOkResponse({ description: 'One page of orders' })
   listOrders(
     @ZodQuery(adminOrderQuerySchema) query: AdminOrderQueryInput,
-  ): Promise<Page<OrderView>> {
+  ): Promise<Page<AdminOrderView>> {
     return this.orders.listAllPaged(
       {
         status: query.status,
@@ -214,7 +214,7 @@ export class AdminController {
   @ApiOkResponse({ description: 'The order' })
   getOrder(
     @ZodParam(adminOrderParamsSchema) params: AdminOrderParams,
-  ): Promise<OrderView> {
+  ): Promise<AdminOrderView> {
     return this.orders.getAny(params.id);
   }
 
@@ -224,7 +224,7 @@ export class AdminController {
   @ApiOkResponse({ description: 'The order after reconciliation' })
   syncOrder(
     @ZodParam(adminOrderParamsSchema) params: AdminOrderParams,
-  ): Promise<OrderView> {
+  ): Promise<AdminOrderView> {
     return this.orders.syncAsAdmin(params.id);
   }
 
