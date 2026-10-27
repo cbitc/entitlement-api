@@ -122,7 +122,14 @@ const toChangeView = (
 const toEntitlements = (
   period: PeriodRow | null,
 ): readonly SubscriptionEntitlementView[] => {
-  const items = period?.grant?.items ?? [];
+  // A revoked or suspended grant grants nothing, even though the period row
+  // and its frozen items remain for audit. `GET /licensing/licenses` and the
+  // admin revocation both rely on this being the only source of truth.
+  if (!period?.grant || period.grant.status !== 'ACTIVE') {
+    return [];
+  }
+
+  const items = period.grant.items;
   return items.map((item) => ({
     code: item.feature.code,
     value: item.value,

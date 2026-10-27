@@ -13,6 +13,7 @@ const productionEnv = {
   ALIPAY_APP_ID: '2026000000000000',
   ALIPAY_PRIVATE_KEY: 'private-key',
   ALIPAY_PUBLIC_KEY: 'public-key',
+  LICENSE_JWT_PRIVATE_KEY: 'test-license-key',
 };
 
 describe('validateEnv', () => {
@@ -111,5 +112,20 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({ ...baseEnv, PAYMENT_PROVIDER: 'alipay' }),
     ).toThrow(/ALIPAY_APP_ID/);
+  });
+
+  it('defaults the license token settings', () => {
+    const env = validateEnv(baseEnv);
+
+    expect(env.LICENSE_JWT_ISSUER).toBe('entitlement-api');
+    expect(env.LICENSE_JWT_AUDIENCE).toBe('entitlement-client');
+    expect(env.LICENSE_TTL_SECONDS).toBe(43_200);
+    expect(env.LICENSE_OFFLINE_TTL_DAYS).toBe(30);
+  });
+
+  it('requires a license signing key in production', () => {
+    expect(() =>
+      validateEnv({ ...productionEnv, LICENSE_JWT_PRIVATE_KEY: '' }),
+    ).toThrow(/LICENSE_JWT_PRIVATE_KEY/);
   });
 });

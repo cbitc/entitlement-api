@@ -9,6 +9,7 @@ import { AppConfigModule } from './config/config.module';
 import { HealthModule } from './health/health.module';
 import { LoggerModule } from './infra/logger/logger.module';
 import { PrismaModule } from './infra/prisma/prisma.module';
+import { LicensingModule } from './licensing/licensing.module';
 import { OrdersModule } from './orders/orders.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { UsersModule } from './users/users.module';
@@ -30,6 +31,7 @@ import { UsersModule } from './users/users.module';
     CatalogModule,
     SubscriptionsModule,
     OrdersModule,
+    LicensingModule,
     HealthModule,
   ],
   providers: [

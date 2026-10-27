@@ -97,6 +97,24 @@ export class AppConfig {
     return this.value('VERIFICATION_CODE_SECRET') ?? this.jwtSecret;
   }
 
+  get license(): {
+    privateKey: string;
+    kid: string;
+    issuer: string;
+    audience: string;
+    tokenTtlSeconds: number;
+    offlineTtlDays: number;
+  } {
+    return {
+      privateKey: this.value('LICENSE_JWT_PRIVATE_KEY'),
+      kid: this.value('LICENSE_JWT_KID'),
+      issuer: this.value('LICENSE_JWT_ISSUER'),
+      audience: this.value('LICENSE_JWT_AUDIENCE'),
+      tokenTtlSeconds: this.value('LICENSE_TTL_SECONDS'),
+      offlineTtlDays: this.value('LICENSE_OFFLINE_TTL_DAYS'),
+    };
+  }
+
   get mailTransport(): Env['MAIL_TRANSPORT'] {
     return this.value('MAIL_TRANSPORT');
   }

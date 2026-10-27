@@ -267,9 +267,34 @@ model Subscription {
   grants           EntitlementGrant[]
   trialRedemptions TrialRedemption[]
   orders           Order[]
+  activations      DeviceActivation[]
 
   @@index([userId, status])
   @@index([status])
+}
+
+/// One machine that consumed an activation slot of the license a subscription
+/// grants. The license itself is not a table: it is derived from the active
+/// period and its grant, so it can never disagree with the subscription.
+///
+/// `activeKey` holds `${subscriptionId}:${machineId}` while the activation is
+/// live and NULL once the device is deactivated; its uniqueness makes obtain
+/// idempotent while still allowing the same machine to be activated again
+/// later (and keeps the deactivation history auditable).
+model DeviceActivation {
+  id              String       @id @default(cuid())
+  subscriptionId  String
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  machineId       String       @db.VarChar(128)
+  activeKey       String?      @unique @db.VarChar(191)
+  activatedAt     DateTime     @default(now()) @db.DateTime(3)
+  lastRefreshedAt DateTime     @default(now()) @db.DateTime(3)
+  deactivatedAt   DateTime?    @db.DateTime(3)
+  createdAt       DateTime     @default(now()) @db.DateTime(3)
+  updatedAt       DateTime     @updatedAt @db.DateTime(3)
+
+  @@index([subscriptionId])
+  @@index([machineId])
 }
 
 /// `PAUSED` freezes entitlement and renewal but keeps the period clock running;

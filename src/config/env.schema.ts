@@ -57,6 +57,22 @@ export const envSchema = z
     JWT_AUDIENCE: z.string().min(1).default('entitlement-api'),
     JWT_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 
+    // License tokens (EdDSA/Ed25519), independent from the HS256 session
+    // tokens above. The key is a PKCS#8 PEM or its raw base64 DER. Production
+    // must configure it; development and tests fall back to an ephemeral key.
+    LICENSE_JWT_PRIVATE_KEY: z.string().default(''),
+    LICENSE_JWT_KID: z.string().min(1).default('lic-1'),
+    LICENSE_JWT_ISSUER: z.string().min(1).default('entitlement-api'),
+    // The desktop SDK defaults to this audience, not the session one.
+    LICENSE_JWT_AUDIENCE: z.string().min(1).default('entitlement-client'),
+    LICENSE_TTL_SECONDS: z.coerce.number().int().positive().default(43_200),
+    LICENSE_OFFLINE_TTL_DAYS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(365)
+      .default(30),
+
     // Key for the verification-code HMAC. Falls back to JWT_SECRET.
     VERIFICATION_CODE_SECRET: z.string().min(32).optional(),
 
@@ -156,6 +172,16 @@ export const envSchema = z
           });
         }
       }
+    }
+
+    // Offline clients verify license tokens long after they were issued, so a
+    // stable key is part of the deployment contract.
+    if (production && env.LICENSE_JWT_PRIVATE_KEY.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['LICENSE_JWT_PRIVATE_KEY'],
+        message: 'LICENSE_JWT_PRIVATE_KEY is required in production',
+      });
     }
   })
   .transform((env) => ({
