@@ -45,12 +45,28 @@ export class VerificationService {
       select: { createdAt: true },
     });
 
-    if (
-      latest &&
-      now.getTime() - latest.createdAt.getTime() < LOGIN_CODE_RESEND_INTERVAL_MS
-    ) {
+    // Use an elapsed-time comparison, not a wall-clock window. If the host
+    // clock is moved backwards (a common way to test expiry), the newest row
+    // is suddenly "in the future"; a negative elapsed value must not be read
+    // as "sent less than a minute ago", or resends are blocked forever.
+    const elapsedMs = latest
+      ? now.getTime() - latest.createdAt.getTime()
+      : Number.POSITIVE_INFINITY;
+
+    if (latest && elapsedMs >= 0 && elapsedMs < LOGIN_CODE_RESEND_INTERVAL_MS) {
       throw AppException.tooManyRequests(
         'A login code was sent recently, please retry in a minute',
+      );
+    }
+
+    if (latest && elapsedMs < 0) {
+      this.logger.warn(
+        {
+          email,
+          createdAt: latest.createdAt.toISOString(),
+          now: now.toISOString(),
+        },
+        'Verification code timestamp is in the future; allowing a resend',
       );
     }
 

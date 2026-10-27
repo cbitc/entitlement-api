@@ -174,6 +174,29 @@ describe('Auth (e2e)', () => {
     expect(sent).toHaveLength(1);
   });
 
+  it('allows a resend when the clock moved backwards', async () => {
+    const api = createApi('10.1.0.9');
+    const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await prisma.verificationCode.create({
+      data: {
+        email: EMAIL,
+        codeHash: '0'.repeat(64),
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        createdAt: future,
+        attemptsRemaining: 5,
+      },
+    });
+
+    await api.requestLogin().expect(202);
+    expect(sent).toHaveLength(1);
+
+    const pending = await prisma.verificationCode.count({
+      where: { email: EMAIL, consumedAt: null },
+    });
+    expect(pending).toBe(1);
+  });
+
   it('refuses a disabled account and invalidates its token', async () => {
     const api = createApi('10.1.0.6');
 
