@@ -1,5 +1,7 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
@@ -100,6 +102,21 @@ describe('Scheduled job runner (e2e)', () => {
     });
     expect(succeeded.durationMs).not.toBeNull();
     expect(succeeded.finishedAt).not.toBeNull();
+  });
+
+  it('reclaims a lease left by a dead local process and deletes it on release', async () => {
+    const deadOwner = `${hostname()}:2147483647:${randomUUID()}`;
+    expect(await lock.acquire('settle', deadOwner, 60_000)).toBe(true);
+
+    const liveOwner = `${hostname()}:${process.pid}:${randomUUID()}`;
+    expect(await lock.acquire('settle', liveOwner, 60_000)).toBe(true);
+
+    const lease = await lock.inspect('settle');
+    expect(lease?.owner).toBe(liveOwner);
+    expect(await lock.extend('settle', liveOwner, 60_000)).toBe(true);
+
+    await lock.release('settle', liveOwner);
+    expect(await prisma.jobLock.count({ where: { name: 'settle' } })).toBe(0);
   });
 
   it('lets an admin trigger the notification dispatcher and read run history', async () => {

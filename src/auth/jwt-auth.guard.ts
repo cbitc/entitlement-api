@@ -6,6 +6,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
+import { PinoLogger } from 'nestjs-pino';
 import type { AuthenticatedUser } from '../common/auth/authenticated-user';
 import { IS_PUBLIC_KEY } from '../common/auth/public.decorator';
 import { AppException } from '../common/errors/app.exception';
@@ -26,6 +27,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly users: UsersService,
     private readonly config: AppConfig,
     private readonly reflector: Reflector,
+    private readonly pino: PinoLogger,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -64,6 +66,9 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     request.user = { id: user.id, email: user.email, role: user.role };
+    // Everything logged downstream belongs to this principal; the completion
+    // log also carries it via `customProps`.
+    this.pino.assign({ userId: user.id, role: user.role });
     return true;
   }
 }

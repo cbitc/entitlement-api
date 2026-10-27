@@ -1,6 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { hostname } from 'node:os';
 import { PrismaService } from '../infra/prisma/prisma.service';
+
+/** `host:pid:uuid`, the owner written by `JobRunnerService`. */
+const OWNER_PATTERN = /^(.*):(\d+):([0-9a-fA-F-]{36})$/;
+
+interface LeaseRow {
+  readonly owner: string;
+  readonly lockedUntil: Date;
+}
 
 /**
  * Leases one job name to one process at a time.
@@ -10,17 +19,25 @@ import { PrismaService } from '../infra/prisma/prisma.service';
  * two replicas doing the same sweep at the same moment. The comparison uses
  * the database clock (`NOW(3)`), because a replica with a skewed clock must
  * not be able to steal a live lease.
+ *
+ * A lease is renewed while its job runs, so the time-to-live only matters
+ * after a crash. Locks left by a process on this host that no longer exists
+ * are reclaimed immediately, which keeps a dev restart from waiting out the
+ * whole lease.
  */
 @Injectable()
 export class JobLockService {
+  private readonly logger = new Logger(JobLockService.name);
+  private readonly host = hostname();
+
   constructor(private readonly prisma: PrismaService) {}
 
   async acquire(name: string, owner: string, ttlMs: number): Promise<boolean> {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const rows = await tx.$queryRaw<
-          Array<{ lockedUntil: Date }>
-        >`SELECT lockedUntil FROM JobLock WHERE name = ${name} FOR UPDATE`;
+          LeaseRow[]
+        >`SELECT owner, lockedUntil FROM JobLock WHERE name = ${name} FOR UPDATE`;
 
         const now = await this.databaseNow(tx);
 
@@ -39,7 +56,16 @@ export class JobLockService {
         }
 
         if (existing.lockedUntil.getTime() > now.getTime()) {
-          return false;
+          if (!this.isDeadLocalOwner(existing.owner)) {
+            return false;
+          }
+          // `nest start --watch` restarts the child without unwinding its
+          // timers; waiting out the lease there would silently pause every
+          // sweep for a minute.
+          this.logger.warn(
+            { job: name, previousOwner: existing.owner },
+            'Reclaiming a lease left by a dead local process',
+          );
         }
 
         await tx.jobLock.update({
@@ -59,12 +85,60 @@ export class JobLockService {
     }
   }
 
-  /** Expires the lease immediately; only the holder may release it. */
-  async release(name: string, owner: string): Promise<void> {
-    await this.prisma.$executeRaw`
-      UPDATE JobLock SET lockedUntil = NOW(3)
+  /**
+   * Pushes the expiry forward. A job that outlives the time-to-live keeps its
+   * lease as long as this succeeds; losing it means another process may have
+   * taken over.
+   */
+  async extend(name: string, owner: string, ttlMs: number): Promise<boolean> {
+    const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    const affected = await this.prisma.$executeRaw`
+      UPDATE JobLock
+      SET lockedUntil = DATE_ADD(NOW(3), INTERVAL ${seconds} SECOND)
       WHERE name = ${name} AND owner = ${owner}
     `;
+    return affected > 0;
+  }
+
+  /** Removes the lease; only the holder can delete it. */
+  async release(name: string, owner: string): Promise<void> {
+    await this.prisma.$executeRaw`
+      DELETE FROM JobLock WHERE name = ${name} AND owner = ${owner}
+    `;
+  }
+
+  /** Who holds a job, for an operator-readable skip message. */
+  inspect(name: string): Promise<{ owner: string; lockedUntil: Date } | null> {
+    return this.prisma.jobLock.findUnique({
+      where: { name },
+      select: { owner: true, lockedUntil: true },
+    });
+  }
+
+  private isDeadLocalOwner(owner: string): boolean {
+    const match = OWNER_PATTERN.exec(owner);
+    if (!match) {
+      return false;
+    }
+
+    const [, host, pidText] = match;
+    if (host !== this.host) {
+      return false;
+    }
+
+    const pid = Number(pidText);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+      return false;
+    }
+
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      // ESRCH means the process is gone; EPERM means it exists but belongs to
+      // another user, which still counts as alive.
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    }
   }
 
   private async databaseNow(tx: Prisma.TransactionClient): Promise<Date> {

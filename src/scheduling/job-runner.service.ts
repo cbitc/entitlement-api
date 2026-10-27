@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { PinoLogger } from 'nestjs-pino';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { AppConfig } from '../config/app-config.service';
@@ -18,9 +19,14 @@ import type { JobName, JobOutcome, JobRunView, JobSource } from './job.types';
  * successful sweep into a failed request.
  */
 @Injectable()
-export class JobRunnerService {
+export class JobRunnerService implements OnApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
   private readonly instanceId = `${hostname()}:${process.pid}`.slice(0, 128);
+  /** Leases held by this process, so a graceful stop releases them at once. */
+  private readonly active = new Map<
+    string,
+    { readonly owner: string; readonly heartbeat: NodeJS.Timeout }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -28,9 +34,23 @@ export class JobRunnerService {
     private readonly lock: JobLockService,
     private readonly orders: OrdersService,
     private readonly notifications: NotificationsService,
+    private readonly pino: PinoLogger,
   ) {}
 
   async run(
+    name: JobName,
+    options: { readonly limit: number; readonly source: JobSource },
+  ): Promise<JobOutcome> {
+    // Bind the job to every log line produced while it runs, including the
+    // domain services it calls. `inherit` keeps the request context when an
+    // operator triggered the run from the console.
+    return this.pino.runInContext(() => this.runWithContext(name, options), {
+      bindings: { job: name, source: options.source },
+      inherit: true,
+    });
+  }
+
+  private async runWithContext(
     name: JobName,
     options: { readonly limit: number; readonly source: JobSource },
   ): Promise<JobOutcome> {
@@ -43,6 +63,15 @@ export class JobRunnerService {
 
     if (!acquired) {
       // A scheduled tick that lost the lease is noise; a manual click is not.
+      const holder = await this.lock.inspect(name).catch(() => null);
+      this.logger.debug(
+        {
+          skipped: true,
+          holder: holder?.owner ?? null,
+          lockedUntil: holder?.lockedUntil.toISOString() ?? null,
+        },
+        'Skipping tick: job lease is held by another instance',
+      );
       if (options.source === 'admin') {
         const record = await this.prisma.jobRun.create({
           data: {
@@ -66,6 +95,17 @@ export class JobRunnerService {
     const startedAt = new Date();
     let recordId: string | null = null;
 
+    // A job may legitimately outlive the lease; keep pushing it forward so a
+    // slow batch is not stolen by the next tick (or another replica).
+    const heartbeat = setInterval(
+      () => {
+        void this.renewLease(name, owner);
+      },
+      Math.max(5_000, Math.floor(this.config.jobs.lockTtlMs / 3)),
+    );
+    heartbeat.unref();
+    this.active.set(name, { owner, heartbeat });
+
     try {
       const record = await this.prisma.jobRun.create({
         data: {
@@ -76,6 +116,7 @@ export class JobRunnerService {
         },
       });
       recordId = record.id;
+      this.pino.assign({ runId: record.id });
 
       const result = await this.execute(name, options.limit, startedAt);
       await this.recordSuccess(record.id, startedAt, result);
@@ -88,11 +129,63 @@ export class JobRunnerService {
       }
       throw error;
     } finally {
+      const lease = this.active.get(name);
+      if (lease?.owner === owner) {
+        this.active.delete(name);
+        clearInterval(lease.heartbeat);
+      }
       await this.lock.release(name, owner).catch((releaseError: unknown) => {
         this.logger.warn(
-          `Could not release the ${name} job lease: ${this.errorMessage(releaseError)}`,
+          { err: releaseError, job: name },
+          'Could not release job lease',
         );
       });
+    }
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    const held = [...this.active.entries()];
+    this.active.clear();
+
+    // `SIGTERM` must not leave a lease that blocks the next process until it
+    // expires; a hard kill is handled by the lease time-to-live.
+    await Promise.all(
+      held.map(async ([name, lease]) => {
+        clearInterval(lease.heartbeat);
+        try {
+          await this.lock.release(name, lease.owner);
+        } catch (error) {
+          this.logger.warn(
+            { err: error, job: name },
+            'Could not release job lease on shutdown',
+          );
+        }
+      }),
+    );
+  }
+
+  private async renewLease(name: string, owner: string): Promise<void> {
+    try {
+      const renewed = await this.lock.extend(
+        name,
+        owner,
+        this.config.jobs.lockTtlMs,
+      );
+      if (renewed) {
+        return;
+      }
+
+      const lease = this.active.get(name);
+      if (lease?.owner === owner) {
+        clearInterval(lease.heartbeat);
+        this.active.delete(name);
+      }
+      this.logger.error(
+        { job: name },
+        'Job lease was lost while running; another instance may take over',
+      );
+    } catch (error) {
+      this.logger.warn({ err: error, job: name }, 'Could not renew job lease');
     }
   }
 
@@ -152,9 +245,7 @@ export class JobRunnerService {
         },
       })
       .catch((error: unknown) => {
-        this.logger.warn(
-          `Could not finish job run ${id}: ${this.errorMessage(error)}`,
-        );
+        this.logger.warn({ err: error, runId: id }, 'Could not finish job run');
       });
   }
 
@@ -176,9 +267,8 @@ export class JobRunnerService {
       })
       .catch((recordError: unknown) => {
         this.logger.warn(
-          `Could not record the failure of job run ${id}: ${this.errorMessage(
-            recordError,
-          )}`,
+          { err: recordError, runId: id },
+          'Could not record the failure of job run',
         );
       });
   }

@@ -52,6 +52,10 @@ export class AppConfig {
     return this.value('LOG_FORMAT');
   }
 
+  get logHttpSuccess(): boolean {
+    return this.value('LOG_HTTP_SUCCESS');
+  }
+
   get bodyLimit(): string {
     return this.value('BODY_LIMIT');
   }

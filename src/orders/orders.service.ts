@@ -425,7 +425,7 @@ export class OrdersService {
     try {
       parsed = this.gateway.parseNotification(payload);
     } catch (error) {
-      this.logger.warn(`Malformed notification: ${this.errorMessage(error)}`);
+      this.logger.warn({ err: error }, 'Malformed payment notification');
       return false;
     }
 
@@ -708,7 +708,8 @@ export class OrdersService {
       } catch (error) {
         skipped += 1;
         this.logger.warn(
-          `Renewal order skipped for period ${period.id}: ${this.errorMessage(error)}`,
+          { err: error, periodId: period.id },
+          'Renewal order skipped',
         );
       }
     }
@@ -867,8 +868,8 @@ export class OrdersService {
       } catch (error) {
         failed += 1;
         this.logger.error(
-          `Settlement failed for subscription ${row.subscriptionId}`,
-          error,
+          { err: error, subscriptionId: row.subscriptionId },
+          'Settlement failed',
         );
       }
     }
@@ -1037,7 +1038,8 @@ export class OrdersService {
       } catch (error) {
         failed += 1;
         this.logger.warn(
-          `Payment sync failed for order ${row.number}: ${this.errorMessage(error)}`,
+          { err: error, orderId: row.id, orderNumber: row.number },
+          'Payment sync failed',
         );
       }
     }
@@ -1196,7 +1198,8 @@ export class OrdersService {
           data: { failureReason: 'LATE_PAYMENT' },
         });
         this.logger.warn(
-          `Late payment captured for closed order ${fresh.number}; refund required`,
+          { orderId: fresh.id, orderNumber: fresh.number },
+          'Late payment captured for closed order; refund required',
         );
         return {
           status: 'FAILED',
@@ -1247,8 +1250,8 @@ export class OrdersService {
         error instanceof AppException ? error.type : 'FULFILLMENT_FAILED';
       if (!(error instanceof AppException)) {
         this.logger.error(
-          `Fulfilment failed for paid order ${fresh.number}`,
-          error,
+          { err: error, orderId: fresh.id, orderNumber: fresh.number },
+          'Fulfilment failed for paid order',
         );
       }
       await tx.order.update({
@@ -1347,7 +1350,8 @@ export class OrdersService {
     } catch (error) {
       // A replayed invalid callback must not turn into a 500.
       this.logger.warn(
-        `Could not store rejected notification: ${this.errorMessage(error)}`,
+        { err: error },
+        'Could not store rejected payment notification',
       );
     }
   }

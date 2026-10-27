@@ -5,6 +5,32 @@ import type { Options } from 'pino-http';
 import { AppConfig } from '../../config/app-config.service';
 import { AppConfigModule } from '../../config/config.module';
 
+/** Probe and key-discovery traffic carries no operational signal. */
+const QUIET_PATHS = new Set([
+  '/health',
+  '/health/ready',
+  '/.well-known/jwks.json',
+  '/favicon.ico',
+]);
+
+/** The path is the key; query strings regularly carry short-lived secrets. */
+const pathOf = (url: string | undefined): string =>
+  (url ?? '').split('?')[0] ?? '';
+
+const isQuiet = (
+  method: string | undefined,
+  url: string | undefined,
+): boolean =>
+  method === 'OPTIONS' ||
+  pathOf(url).startsWith('/docs') ||
+  QUIET_PATHS.has(pathOf(url));
+
+interface RequestContext {
+  readonly id?: string;
+  readonly method?: string;
+  readonly url?: string;
+}
+
 @Module({
   imports: [
     PinoLoggerModule.forRootAsync({
@@ -24,7 +50,43 @@ import { AppConfigModule } from '../../config/config.module';
             return requestId;
           },
 
-          // Never let credentials reach the log stream.
+          // One request is one line: method, path, status and timing. Headers
+          // (security headers, rate-limit counters, user-agent) are noise and
+          // are deliberately not serialized.
+          serializers: {
+            req: (req) => {
+              const request = req as unknown as RequestContext;
+              return {
+                id: request.id,
+                method: request.method,
+                url: pathOf(request.url),
+              };
+            },
+            res: (res) => ({ statusCode: res.statusCode }),
+          },
+
+          // Liveness probes and key discovery would otherwise dominate volume.
+          autoLogging: {
+            ignore: (req) => isQuiet(req.method, req.url),
+          },
+
+          customLogLevel: (_req, res, err) => {
+            if (err || res.statusCode >= 500) {
+              return 'error';
+            }
+            if (res.statusCode >= 400) {
+              return 'warn';
+            }
+            return config.logHttpSuccess ? 'info' : 'silent';
+          },
+
+          customSuccessMessage: (req, res) =>
+            `${req.method} ${pathOf(req.url)} ${res.statusCode}`,
+          customErrorMessage: (req, res) =>
+            `${req.method} ${pathOf(req.url)} ${res.statusCode}`,
+
+          // Defence in depth: the serializers above already drop headers, but
+          // an unexpected serializer change must not leak credentials.
           redact: {
             paths: [
               'req.headers.authorization',
@@ -32,18 +94,6 @@ import { AppConfigModule } from '../../config/config.module';
               'res.headers["set-cookie"]',
             ],
             censor: '[redacted]',
-          },
-
-          // Liveness probes would otherwise dominate the log volume.
-          autoLogging: {
-            ignore: (req) => req.url === '/health',
-          },
-
-          customLogLevel: (_req, res, err) => {
-            if (err || res.statusCode >= 500) {
-              return 'error';
-            }
-            return res.statusCode >= 400 ? 'warn' : 'info';
           },
         };
 
@@ -54,6 +104,8 @@ import { AppConfigModule } from '../../config/config.module';
               singleLine: true,
               colorize: true,
               translateTime: 'SYS:HH:MM:ss.l',
+              // The pid and hostname are constant in a local process.
+              ignore: 'pid,hostname',
             },
           };
         }

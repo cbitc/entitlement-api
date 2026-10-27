@@ -38,6 +38,13 @@ describe('validateEnv', () => {
     ).toBe(false);
   });
 
+  it('logs successful requests unless explicitly silenced', () => {
+    expect(validateEnv(baseEnv).LOG_HTTP_SUCCESS).toBe(true);
+    expect(
+      validateEnv({ ...baseEnv, LOG_HTTP_SUCCESS: 'false' }).LOG_HTTP_SUCCESS,
+    ).toBe(false);
+  });
+
   it('coerces numbers and splits comma separated origins', () => {
     const env = validateEnv({
       ...baseEnv,

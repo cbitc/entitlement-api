@@ -83,8 +83,8 @@ export class VerificationService {
       await this.mailer.sendLoginCode({ to: email, code, expiresAt });
     } catch (error) {
       this.logger.error(
-        `Failed to deliver a login code to ${email}`,
-        error instanceof Error ? error.stack : undefined,
+        { err: error, email },
+        'Failed to deliver a login code',
       );
       // Do not leave a code the user never received alive.
       await this.prisma.verificationCode

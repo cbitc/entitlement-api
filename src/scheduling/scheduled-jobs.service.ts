@@ -61,9 +61,12 @@ export class ScheduledJobsService
     }
 
     this.logger.log(
-      `Scheduler started: ${definitions
-        .map((definition) => `${definition.name}@${definition.intervalMs}ms`)
-        .join(', ')}`,
+      {
+        jobs: definitions.map(
+          (definition) => `${definition.name}@${definition.intervalMs}ms`,
+        ),
+      },
+      'Scheduler started',
     );
   }
 
@@ -121,11 +124,7 @@ export class ScheduledJobsService
       });
     } catch (error) {
       // A failing batch must never kill the interval; the next tick retries.
-      this.logger.error(
-        `Scheduled job ${name} failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.error({ err: error, job: name }, 'Scheduled job failed');
     }
   }
 }

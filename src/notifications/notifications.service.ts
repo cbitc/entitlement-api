@@ -313,12 +313,14 @@ export class NotificationsService {
         if (exhausted) {
           failed += 1;
           this.logger.error(
-            `Notification ${row.id} (${row.type}) failed permanently after ${attempts} attempts: ${message}`,
+            { err: error, notificationId: row.id, type: row.type, attempts },
+            'Notification failed permanently',
           );
         } else {
           retried += 1;
           this.logger.warn(
-            `Notification ${row.id} (${row.type}) failed, retry ${attempts}: ${message}`,
+            { err: error, notificationId: row.id, type: row.type, attempts },
+            'Notification delivery failed; retry scheduled',
           );
         }
       }

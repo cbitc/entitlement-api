@@ -41,6 +41,9 @@ export const envSchema = z
       .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
       .default('info'),
     LOG_FORMAT: z.enum(['pretty', 'json']).optional(),
+    // Successful requests are useful while developing against the API and
+    // noisy when tailing a busy server. 4xx/5xx are always logged.
+    LOG_HTTP_SUCCESS: z.enum(['true', 'false']).optional(),
 
     BODY_LIMIT: z.string().min(1).default('1mb'),
 
@@ -274,6 +277,10 @@ export const envSchema = z
       env.SCHEDULER_ENABLED === undefined
         ? env.NODE_ENV !== 'test'
         : env.SCHEDULER_ENABLED === 'true',
+    LOG_HTTP_SUCCESS:
+      env.LOG_HTTP_SUCCESS === undefined
+        ? true
+        : env.LOG_HTTP_SUCCESS === 'true',
   }));
 
 export type Env = z.output<typeof envSchema>;
