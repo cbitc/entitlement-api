@@ -12,6 +12,7 @@ import { LoggerModule } from './infra/logger/logger.module';
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { LicensingModule } from './licensing/licensing.module';
 import { OrdersModule } from './orders/orders.module';
+import { SchedulingModule } from './scheduling/scheduling.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { UsersModule } from './users/users.module';
 
@@ -33,6 +34,7 @@ import { UsersModule } from './users/users.module';
     SubscriptionsModule,
     OrdersModule,
     LicensingModule,
+    SchedulingModule,
     AdminModule,
     HealthModule,
   ],

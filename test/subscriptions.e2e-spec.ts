@@ -205,6 +205,9 @@ describe('Subscriptions and payments (e2e)', () => {
 
   beforeEach(async () => {
     notifySeq = 0;
+    await prisma.outboundNotification.deleteMany();
+    await prisma.jobRun.deleteMany();
+    await prisma.jobLock.deleteMany();
     await prisma.refund.deleteMany();
     await prisma.paymentNotification.deleteMany();
     await prisma.payment.deleteMany();

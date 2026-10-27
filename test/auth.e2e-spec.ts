@@ -94,6 +94,9 @@ describe('Auth (e2e)', () => {
   beforeEach(async () => {
     sent.length = 0;
     mailer.sendLoginCode.mockClear();
+    await prisma.outboundNotification.deleteMany();
+    await prisma.jobRun.deleteMany();
+    await prisma.jobLock.deleteMany();
     await prisma.verificationCode.deleteMany();
     await prisma.user.deleteMany();
   });

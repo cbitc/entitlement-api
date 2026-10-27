@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { paginationSchema } from '../common/http/pagination';
+import { JOB_NAMES } from '../scheduling/job.types';
 
 const idSchema = z.string().trim().min(1).max(191);
 const codeSchema = z.string().trim().min(1).max(64);
@@ -58,12 +59,38 @@ export const adminOrderParamsSchema = z.object({ id: idSchema });
 /* Jobs ------------------------------------------------------------------- */
 
 export const adminJobParamsSchema = z.object({
-  name: z.enum(['renewal-orders', 'settle', 'expire-orders', 'sync-payments']),
+  name: z.enum(JOB_NAMES),
 });
 
 export const adminRunJobSchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(200),
 });
+
+export const adminJobRunQuerySchema = z.object({
+  name: z.enum(JOB_NAMES).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+/* Notifications ---------------------------------------------------------- */
+
+export const adminNotificationQuerySchema = paginationSchema.extend({
+  status: z.enum(['PENDING', 'SENDING', 'SENT', 'FAILED']).optional(),
+  type: z
+    .enum(['PAYMENT_SUCCEEDED', 'SUBSCRIPTION_EXPIRED', 'REFUND_ISSUED'])
+    .optional(),
+  email: z.string().trim().max(254).optional(),
+  userId: idSchema.optional(),
+});
+
+export const adminNotificationParamsSchema = z.object({ id: idSchema });
+
+export type AdminNotificationQuery = z.output<
+  typeof adminNotificationQuerySchema
+>;
+export type AdminNotificationParams = z.output<
+  typeof adminNotificationParamsSchema
+>;
+export type AdminJobRunQuery = z.output<typeof adminJobRunQuerySchema>;
 
 /* Licenses --------------------------------------------------------------- */
 

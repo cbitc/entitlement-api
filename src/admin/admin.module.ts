@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { LicensingModule } from '../licensing/licensing.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { OrdersModule } from '../orders/orders.module';
+import { SchedulingModule } from '../scheduling/scheduling.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { UsersModule } from '../users/users.module';
 import { AdminCatalogController } from './admin.catalog.controller';
@@ -15,7 +17,14 @@ import { CatalogAdminService } from './catalog-admin.service';
  * so the admin path cannot drift from the customer path.
  */
 @Module({
-  imports: [UsersModule, SubscriptionsModule, OrdersModule, LicensingModule],
+  imports: [
+    UsersModule,
+    SubscriptionsModule,
+    OrdersModule,
+    LicensingModule,
+    NotificationsModule,
+    SchedulingModule,
+  ],
   controllers: [AdminController, AdminCatalogController],
   providers: [CatalogAdminService],
 })

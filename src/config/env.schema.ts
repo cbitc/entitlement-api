@@ -51,6 +51,53 @@ export const envSchema = z
     THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
 
+    // In-process scheduler. Disabling it leaves only the admin trigger
+    // (`POST /admin/jobs/:name/run`); tests disable it by default so timers
+    // never race the assertions.
+    SCHEDULER_ENABLED: z.enum(['true', 'false']).optional(),
+    JOB_SETTLE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+    JOB_RENEWAL_ORDERS_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(3_600_000),
+    JOB_EXPIRE_ORDERS_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(300_000),
+    JOB_SYNC_PAYMENTS_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(900_000),
+    JOB_NOTIFICATIONS_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30_000),
+    /** Rows one scheduled tick may process. */
+    JOB_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+    /** How long a job lease stays valid when its holder dies mid-run. */
+    JOB_LOCK_TTL_MS: z.coerce.number().int().positive().default(600_000),
+
+    // Transactional outbound mail.
+    NOTIFICATION_BATCH_SIZE: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .default(50),
+    NOTIFICATION_MAX_ATTEMPTS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(20)
+      .default(5),
+    NOTIFICATION_TIME_ZONE: z.string().min(1).default('Asia/Shanghai'),
+    /** Base URL of the customer portal used in message links. */
+    WEB_APP_URL: z.url().default('http://localhost:5173'),
+
     // Session tokens (JWT, HMAC/HS256). The secret must be at least 32 chars.
     JWT_SECRET: z.string().min(32),
     JWT_ISSUER: z.string().min(1).default('entitlement-api'),
@@ -221,6 +268,12 @@ export const envSchema = z
     PAYMENT_PROVIDER:
       env.PAYMENT_PROVIDER ??
       (env.NODE_ENV === 'production' ? ('alipay' as const) : ('log' as const)),
+    // Tests never need timers: their database is shared and assertions want
+    // deterministic ordering.
+    SCHEDULER_ENABLED:
+      env.SCHEDULER_ENABLED === undefined
+        ? env.NODE_ENV !== 'test'
+        : env.SCHEDULER_ENABLED === 'true',
   }));
 
 export type Env = z.output<typeof envSchema>;

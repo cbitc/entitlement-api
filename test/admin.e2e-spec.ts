@@ -86,6 +86,9 @@ describe('Admin (e2e)', () => {
   });
 
   beforeEach(async () => {
+    await prisma.outboundNotification.deleteMany();
+    await prisma.jobRun.deleteMany();
+    await prisma.jobLock.deleteMany();
     await prisma.refund.deleteMany();
     await prisma.paymentNotification.deleteMany();
     await prisma.payment.deleteMany();

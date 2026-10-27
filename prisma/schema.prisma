@@ -35,6 +35,7 @@ model User {
   requestedChanges SubscriptionChange[]
   orders           Order[]
   refunds          Refund[]
+  notifications    OutboundNotification[]
 
   @@index([status])
 }
@@ -610,4 +611,91 @@ model Refund {
   failureReason     String?      @db.VarChar(120)
 
   @@index([orderId, status])
+}
+
+/// A short lease that lets exactly one process execute a scheduled job.
+///
+/// `lockedUntil` is compared against the database clock, never the process
+/// clock, so replicas with skewed time still agree on who holds the job. A
+/// crashed holder simply lets the lease expire; no cleanup task is required.
+model JobLock {
+  name        String   @id @db.VarChar(64)
+  owner       String   @db.VarChar(128)
+  lockedUntil DateTime @db.DateTime(3)
+  updatedAt   DateTime @updatedAt @db.DateTime(3)
+}
+
+enum JobRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+/// One execution of a scheduled job.
+///
+/// `result` keeps the counters the job returned, so an operator can tell a
+/// quiet night from a job that never ran. Scheduled ticks that lose the lock
+/// are not recorded (they would only produce noise); manual runs are, with
+/// status SKIPPED, because somebody explicitly asked for them.
+model JobRun {
+  id           String       @id @default(cuid())
+  name         String       @db.VarChar(64)
+  status       JobRunStatus @default(RUNNING)
+  startedAt    DateTime     @default(now()) @db.DateTime(3)
+  finishedAt   DateTime?    @db.DateTime(3)
+  durationMs   Int?
+  result       Json?
+  errorMessage String?      @db.VarChar(255)
+  instanceId   String       @db.VarChar(128)
+  createdAt    DateTime     @default(now()) @db.DateTime(3)
+
+  @@index([name, startedAt])
+  @@index([status, startedAt])
+}
+
+/// What an outbound message is about. Only the events that actually change
+/// what the customer owns are sent by mail; marketing is not a domain event.
+enum NotificationType {
+  PAYMENT_SUCCEEDED
+  SUBSCRIPTION_EXPIRED
+  REFUND_ISSUED
+}
+
+enum OutboundNotificationStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+/// Transactional outbox for customer mail.
+///
+/// The row is written in the same transaction as the business change, so a
+/// captured payment can never exist without its receipt and a rolled-back
+/// change never sends a message. Delivery is a separate job: it claims rows,
+/// sends them, and retries with backoff. `dedupeKey` makes a replayed callback
+/// or a retried job enqueue at most one message.
+model OutboundNotification {
+  id            String                      @id @default(cuid())
+  userId        String?
+  user          User?                       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// Recipient snapshot: the address that was valid when the event happened.
+  email         String                      @db.VarChar(254)
+  type          NotificationType
+  status        OutboundNotificationStatus  @default(PENDING)
+  subject       String                      @db.VarChar(200)
+  payload       Json
+  dedupeKey     String?                     @unique @db.VarChar(191)
+  attempts      Int                         @default(0)
+  /// When the next attempt is due; NULL means "as soon as possible".
+  nextAttemptAt DateTime?                   @db.DateTime(3)
+  claimedAt     DateTime?                   @db.DateTime(3)
+  sentAt        DateTime?                   @db.DateTime(3)
+  lastError     String?                     @db.VarChar(255)
+  createdAt     DateTime                    @default(now()) @db.DateTime(3)
+  updatedAt     DateTime                    @updatedAt @db.DateTime(3)
+
+  @@index([status, nextAttemptAt])
+  @@index([userId, createdAt])
 }

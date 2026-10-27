@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import type { AppConfig } from '../../config/app-config.service';
-import { Mailer, type LoginCodeMail } from './mailer';
+import { Mailer, type LoginCodeMail, type OutboundMail } from './mailer';
 
 /** SMTP transport used outside development. */
 export class SmtpMailer extends Mailer {
@@ -25,12 +25,21 @@ export class SmtpMailer extends Mailer {
       Math.round((mail.expiresAt.getTime() - Date.now()) / 60_000),
     );
 
+    await this.sendMail({
+      to: mail.to,
+      subject: '登录验证码',
+      text: `你的登录验证码是 ${mail.code}，${minutes} 分钟内有效。`,
+      html: `<p>你的登录验证码是 <strong>${mail.code}</strong>。</p><p>${minutes} 分钟内有效。</p>`,
+    });
+  }
+
+  async sendMail(mail: OutboundMail): Promise<void> {
     await this.transport.sendMail({
       from: this.config.smtp.from,
       to: mail.to,
-      subject: 'Your login code',
-      text: `Your login code is ${mail.code}. It expires in ${minutes} minutes.`,
-      html: `<p>Your login code is <strong>${mail.code}</strong>.</p><p>It expires in ${minutes} minutes.</p>`,
+      subject: mail.subject,
+      text: mail.text,
+      html: mail.html,
     });
   }
 }

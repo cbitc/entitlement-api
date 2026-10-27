@@ -15,6 +15,7 @@ import type {
   ProviderPaymentStatus,
 } from '../infra/payments/payment-gateway';
 import { PrismaService } from '../infra/prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { SubscriptionLifecycleService } from '../subscriptions/subscription-lifecycle.service';
 import {
   SubscriptionPeriodsService,
@@ -120,6 +121,7 @@ export class OrdersService {
     private readonly periods: SubscriptionPeriodsService,
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly fulfillment: OrderFulfillmentService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listForUser(userId: string): Promise<OrderView[]> {
@@ -500,6 +502,8 @@ export class OrdersService {
             completedAt: now,
           },
         });
+
+        await this.notifications.enqueueRefundSucceeded(tx, refund.id);
 
         await tx.order.update({
           where: { id: order.id },
@@ -1241,6 +1245,10 @@ export class OrdersService {
         paymentId: payment.id,
       };
     }
+
+    // The money is captured and the term is granted (now or at the boundary),
+    // so this is the one point where a receipt is both true and useful.
+    await this.notifications.enqueuePaymentSucceeded(tx, fresh.id);
 
     return {
       status: 'PROCESSED',

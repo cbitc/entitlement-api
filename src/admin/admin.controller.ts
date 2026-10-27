@@ -22,15 +22,22 @@ import { mapPage, type Page } from '../common/http/pagination';
 import { ZodBody, ZodParam, ZodQuery } from '../common/http/zod.decorators';
 import { LicensingService } from '../licensing/licensing.service';
 import type { AdminLicenseView } from '../licensing/licensing.types';
+import { NotificationsService } from '../notifications/notifications.service';
+import type { AdminNotificationView } from '../notifications/notifications.types';
 import { OrdersService } from '../orders/orders.service';
 import type { OrderView } from '../orders/orders.types';
+import { JobRunnerService } from '../scheduling/job-runner.service';
+import type { JobRunView } from '../scheduling/job.types';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import type { AdminSubscriptionView } from '../subscriptions/subscriptions.types';
 import { UsersService } from '../users/users.service';
 import {
   adminActivationParamsSchema,
   adminJobParamsSchema,
+  adminJobRunQuerySchema,
   adminLicenseQuerySchema,
+  adminNotificationParamsSchema,
+  adminNotificationQuerySchema,
   adminOrderParamsSchema,
   adminOrderQuerySchema,
   adminRunJobSchema,
@@ -41,7 +48,10 @@ import {
   adminUserQuerySchema,
   type AdminActivationParams,
   type AdminJobParams,
+  type AdminJobRunQuery,
   type AdminLicenseQueryInput,
+  type AdminNotificationParams,
+  type AdminNotificationQuery,
   type AdminOrderParams,
   type AdminOrderQueryInput,
   type AdminRunJobInput,
@@ -80,6 +90,8 @@ export class AdminController {
     private readonly subscriptions: SubscriptionsService,
     private readonly orders: OrdersService,
     private readonly licensing: LicensingService,
+    private readonly jobs: JobRunnerService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /* Users ---------------------------------------------------------------- */
@@ -224,21 +236,61 @@ export class AdminController {
     summary: 'Run a scheduled job once (admin replacement for cron)',
   })
   @ApiOkResponse({ description: 'The job counters' })
-  runJob(
+  async runJob(
     @ZodParam(adminJobParamsSchema) params: AdminJobParams,
     @ZodBody(adminRunJobSchema) body: AdminRunJobInput,
   ): Promise<unknown> {
-    const now = new Date();
-    switch (params.name) {
-      case 'renewal-orders':
-        return this.orders.createRenewalOrders(now, body.limit);
-      case 'settle':
-        return this.orders.settleDueSubscriptions(now, body.limit);
-      case 'expire-orders':
-        return this.orders.expireOrders(now, body.limit);
-      case 'sync-payments':
-        return this.orders.syncPendingOrders(now, body.limit);
+    const outcome = await this.jobs.run(params.name, {
+      limit: body.limit,
+      source: 'admin',
+    });
+
+    // The console renders whatever the job returned; a skipped run is the one
+    // case where there are no counters to show.
+    if (outcome.status === 'SKIPPED') {
+      return { skipped: true };
     }
+    return outcome.result;
+  }
+
+  @Get('jobs/runs')
+  @ApiOperation({ summary: 'Recent job runs, newest first' })
+  @ApiOkResponse({ description: 'Run history with duration and result' })
+  listJobRuns(
+    @ZodQuery(adminJobRunQuerySchema) query: AdminJobRunQuery,
+  ): Promise<JobRunView[]> {
+    return this.jobs.listRuns({ name: query.name, limit: query.limit });
+  }
+
+  /* Notifications -------------------------------------------------------- */
+
+  @Get('notifications')
+  @ApiOperation({ summary: 'Search outbound mail and its delivery status' })
+  @ApiOkResponse({ description: 'One page of notifications' })
+  listNotifications(
+    @ZodQuery(adminNotificationQuerySchema) query: AdminNotificationQuery,
+  ): Promise<Page<AdminNotificationView>> {
+    return this.notifications.listPaged(
+      {
+        status: query.status,
+        type: query.type,
+        email: query.email,
+        userId: query.userId,
+      },
+      query,
+    );
+  }
+
+  @Post('notifications/:id/resend')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Queue a notification for another delivery attempt',
+  })
+  @ApiOkResponse({ description: 'The notification back in PENDING' })
+  resendNotification(
+    @ZodParam(adminNotificationParamsSchema) params: AdminNotificationParams,
+  ): Promise<AdminNotificationView> {
+    return this.notifications.resend(params.id);
   }
 
   /* Licenses ------------------------------------------------------------- */

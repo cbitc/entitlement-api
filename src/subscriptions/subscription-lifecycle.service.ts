@@ -5,6 +5,7 @@ import type {
   SubscriptionStatus,
 } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
+import { NotificationsService } from '../notifications/notifications.service';
 import { SubscriptionPeriodsService } from './subscription-periods.service';
 
 export interface TerminateSubscriptionParams {
@@ -29,7 +30,10 @@ export interface TerminateSubscriptionParams {
  */
 @Injectable()
 export class SubscriptionLifecycleService {
-  constructor(private readonly periods: SubscriptionPeriodsService) {}
+  constructor(
+    private readonly periods: SubscriptionPeriodsService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /** Releases every live activation slot of a subscription. */
   async deactivateDevices(
@@ -106,6 +110,16 @@ export class SubscriptionLifecycleService {
           requestedByUserId: params.actorUserId ?? null,
         },
       });
+    }
+
+    // Only an expiry is a failed renewal; a cancellation is either explicit
+    // (no mail) or a refund revocation (the refund mail already covers it).
+    if (params.status === 'EXPIRED') {
+      await this.notifications.enqueueSubscriptionExpired(
+        tx,
+        params.subscriptionId,
+        params.endedAt,
+      );
     }
   }
 }

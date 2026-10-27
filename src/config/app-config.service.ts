@@ -76,6 +76,44 @@ export class AppConfig {
     return this.value('THROTTLE_LIMIT');
   }
 
+  get schedulerEnabled(): boolean {
+    return this.value('SCHEDULER_ENABLED');
+  }
+
+  get jobs(): {
+    settleIntervalMs: number;
+    renewalOrdersIntervalMs: number;
+    expireOrdersIntervalMs: number;
+    syncPaymentsIntervalMs: number;
+    notificationsIntervalMs: number;
+    batchSize: number;
+    lockTtlMs: number;
+  } {
+    return {
+      settleIntervalMs: this.value('JOB_SETTLE_INTERVAL_MS'),
+      renewalOrdersIntervalMs: this.value('JOB_RENEWAL_ORDERS_INTERVAL_MS'),
+      expireOrdersIntervalMs: this.value('JOB_EXPIRE_ORDERS_INTERVAL_MS'),
+      syncPaymentsIntervalMs: this.value('JOB_SYNC_PAYMENTS_INTERVAL_MS'),
+      notificationsIntervalMs: this.value('JOB_NOTIFICATIONS_INTERVAL_MS'),
+      batchSize: this.value('JOB_BATCH_SIZE'),
+      lockTtlMs: this.value('JOB_LOCK_TTL_MS'),
+    };
+  }
+
+  get notifications(): {
+    batchSize: number;
+    maxAttempts: number;
+    timeZone: string;
+    webAppUrl: string;
+  } {
+    return {
+      batchSize: this.value('NOTIFICATION_BATCH_SIZE'),
+      maxAttempts: this.value('NOTIFICATION_MAX_ATTEMPTS'),
+      timeZone: this.value('NOTIFICATION_TIME_ZONE'),
+      webAppUrl: this.value('WEB_APP_URL'),
+    };
+  }
+
   get jwtSecret(): string {
     return this.value('JWT_SECRET');
   }

@@ -28,6 +28,16 @@ describe('validateEnv', () => {
     expect(env.CORS_ORIGINS).toEqual(['http://localhost:5173']);
   });
 
+  it('disables the scheduler only in tests or on request', () => {
+    expect(validateEnv(baseEnv).SCHEDULER_ENABLED).toBe(true);
+    expect(
+      validateEnv({ ...baseEnv, NODE_ENV: 'test' }).SCHEDULER_ENABLED,
+    ).toBe(false);
+    expect(
+      validateEnv({ ...baseEnv, SCHEDULER_ENABLED: 'false' }).SCHEDULER_ENABLED,
+    ).toBe(false);
+  });
+
   it('coerces numbers and splits comma separated origins', () => {
     const env = validateEnv({
       ...baseEnv,
