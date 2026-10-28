@@ -8,6 +8,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { AppConfig } from './config/app-config.service';
 import { AppConfigModule } from './config/config.module';
 import { HealthModule } from './health/health.module';
+import { ClockModule } from './infra/clock/clock.module';
 import { LoggerModule } from './infra/logger/logger.module';
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { LicensingModule } from './licensing/licensing.module';
@@ -19,6 +20,7 @@ import { UsersModule } from './users/users.module';
 @Module({
   imports: [
     AppConfigModule,
+    ClockModule,
     LoggerModule,
     ThrottlerModule.forRootAsync({
       imports: [AppConfigModule],

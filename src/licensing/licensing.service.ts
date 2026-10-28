@@ -7,6 +7,7 @@ import {
   type Page,
   type Pagination,
 } from '../common/http/pagination';
+import { Clock } from '../infra/clock/clock';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { LicenseTokenService } from './license-token.service';
 import type { LicenseMachineInput } from './licensing.schemas';
@@ -104,13 +105,14 @@ export class LicensingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokens: LicenseTokenService,
+    private readonly clock: Clock,
   ) {}
 
   async obtain(
     userId: string,
     input: LicenseMachineInput,
     offline = false,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<LicenseTokenView> {
     const resolved = await this.prisma.$transaction(async (tx) => {
       const candidate = await this.findSubscription(
@@ -205,7 +207,7 @@ export class LicensingService {
   async deactivate(
     userId: string,
     input: LicenseMachineInput,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<void> {
     const subscription = await this.findSubscription(
       this.prisma,
@@ -235,7 +237,10 @@ export class LicensingService {
     }
   }
 
-  async listForUser(userId: string): Promise<LicenseListResponse> {
+  async listForUser(
+    userId: string,
+    now: Date = this.clock.now(),
+  ): Promise<LicenseListResponse> {
     const rows = await this.prisma.subscription.findMany({
       where: {
         userId,
@@ -247,14 +252,16 @@ export class LicensingService {
     });
 
     return {
-      licenses: rows.filter(isVisibleLicense).map(toLicenseView),
+      licenses: rows
+        .filter((row) => isVisibleLicense(row, now))
+        .map(toLicenseView),
     };
   }
 
   async adminList(
     filter: AdminLicenseFilter,
     pagination: Pagination,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<Page<AdminLicenseView>> {
     const userId = await this.resolveAdminUser(filter);
     const where: Prisma.SubscriptionWhereInput = {
@@ -284,7 +291,7 @@ export class LicensingService {
   /** Support unbinding: the user lost a machine and cannot release the slot. */
   async deactivateAsAdmin(
     activationId: string,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<void> {
     const activation = await this.prisma.deviceActivation.findUnique({
       where: { id: activationId },
@@ -380,7 +387,7 @@ const toAdminLicenseView = (row: AdminLicenseRow): AdminLicenseView => ({
  * An ended period is history, not a license the caller still holds. Paused
  * subscriptions stay visible so the user can see what is suspended.
  */
-const isVisibleLicense = (row: LicenseRow): boolean => {
+const isVisibleLicense = (row: LicenseRow, now: Date): boolean => {
   const period = row.periods[0];
-  return period !== undefined && period.endsAt.getTime() > Date.now();
+  return period !== undefined && period.endsAt.getTime() > now.getTime();
 };

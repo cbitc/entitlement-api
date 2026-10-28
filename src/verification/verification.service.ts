@@ -1,6 +1,7 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { AppException } from '../common/errors/app.exception';
 import { AppConfig } from '../config/app-config.service';
+import { Clock } from '../infra/clock/clock';
 import { Mailer } from '../infra/mail/mailer';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import {
@@ -33,11 +34,12 @@ export class VerificationService {
     private readonly prisma: PrismaService,
     private readonly mailer: Mailer,
     private readonly config: AppConfig,
+    private readonly clock: Clock,
   ) {}
 
   async requestLoginCode(
     email: string,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<IssuedLoginCode> {
     const latest = await this.prisma.verificationCode.findFirst({
       where: { email },
@@ -91,6 +93,11 @@ export class VerificationService {
           codeHash,
           expiresAt,
           attemptsRemaining: LOGIN_CODE_MAX_ATTEMPTS,
+          // Written from the application clock, not the database default: the
+          // resend throttle compares this row against `now`, and the two must
+          // come from the same source or a controlled clock looks like a
+          // host that jumped backwards.
+          createdAt: now,
         },
       }),
     ]);
@@ -126,7 +133,7 @@ export class VerificationService {
   async consumeLoginCode(
     email: string,
     code: string,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<void> {
     const record = await this.prisma.verificationCode.findFirst({
       where: { email, consumedAt: null },

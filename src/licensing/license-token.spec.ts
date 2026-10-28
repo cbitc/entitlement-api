@@ -1,5 +1,6 @@
 import { importJWK, jwtVerify } from 'jose';
 import { describe, expect, it } from 'vitest';
+import { FakeClock } from '../../test/support/fake-clock';
 import type { AppConfig } from '../config/app-config.service';
 import { LicenseTokenService } from './license-token.service';
 
@@ -30,7 +31,7 @@ const issueInput = (expiresAt: Date) => ({
 
 describe('LicenseTokenService', () => {
   it('publishes a public JWK without the private scalar', async () => {
-    const service = new LicenseTokenService(makeConfig());
+    const service = new LicenseTokenService(makeConfig(), new FakeClock());
     await service.onModuleInit();
 
     const [key] = service.jwks().keys;
@@ -45,7 +46,7 @@ describe('LicenseTokenService', () => {
   });
 
   it('signs claims that verify against the published JWK', async () => {
-    const service = new LicenseTokenService(makeConfig());
+    const service = new LicenseTokenService(makeConfig(), new FakeClock());
     await service.onModuleInit();
 
     const now = new Date('2026-10-27T00:00:00.000Z');
@@ -81,7 +82,7 @@ describe('LicenseTokenService', () => {
   });
 
   it('caps the token at the period expiry', async () => {
-    const service = new LicenseTokenService(makeConfig());
+    const service = new LicenseTokenService(makeConfig(), new FakeClock());
     await service.onModuleInit();
 
     const now = new Date('2026-10-27T00:00:00.000Z');

@@ -4,6 +4,8 @@ import type { PlanInterval, Prisma } from '@prisma/client';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
+import { Clock } from '../src/infra/clock/clock';
+import { FakeClock } from './support/fake-clock';
 import { PrismaService } from '../src/infra/prisma/prisma.service';
 
 describe('Catalog (e2e)', () => {
@@ -68,7 +70,10 @@ describe('Catalog (e2e)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(Clock)
+      .useValue(new FakeClock())
+      .compile();
 
     app = moduleRef.createNestApplication();
     await app.init();

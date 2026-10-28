@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
+import { Clock } from '../infra/clock/clock';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { addDays } from './period-math';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
@@ -235,6 +236,7 @@ export class SubscriptionsService {
     private readonly prisma: PrismaService,
     private readonly periods: SubscriptionPeriodsService,
     private readonly lifecycle: SubscriptionLifecycleService,
+    private readonly clock: Clock,
   ) {}
 
   async listForUser(userId: string): Promise<SubscriptionView[]> {
@@ -315,7 +317,7 @@ export class SubscriptionsService {
   async cancelImmediately(
     actorUserId: string,
     id: string,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<AdminSubscriptionView> {
     return this.prisma.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({
@@ -363,7 +365,7 @@ export class SubscriptionsService {
   async create(
     userId: string,
     input: CreateSubscriptionInput,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<SubscriptionView> {
     const product = await this.prisma.product.findUnique({
       where: { code: input.productCode },
@@ -476,6 +478,8 @@ export class SubscriptionsService {
     id: string,
     input: ChangeSubscriptionInput,
   ): Promise<SubscriptionView> {
+    const now = this.clock.now();
+
     return this.prisma.$transaction(async (tx) => {
       const subscription = await this.lockOwned(tx, userId, id);
       if (
@@ -499,7 +503,7 @@ export class SubscriptionsService {
       await this.ensureNoPendingChange(tx, id);
       await this.assertNoPaidRenewal(tx, id);
       // An unpaid renewal order priced the old terms; the job recreates it.
-      await this.closePendingOrders(tx, id);
+      await this.closePendingOrders(tx, id, now);
       const target = await this.resolveTarget(
         tx,
         subscription.productId,
@@ -529,6 +533,8 @@ export class SubscriptionsService {
     id: string,
     changeId: string,
   ): Promise<SubscriptionView> {
+    const now = this.clock.now();
+
     return this.prisma.$transaction(async (tx) => {
       await this.lockOwned(tx, userId, id);
 
@@ -544,7 +550,7 @@ export class SubscriptionsService {
       }
 
       await this.assertNoPaidRenewal(tx, id);
-      await this.closePendingOrders(tx, id);
+      await this.closePendingOrders(tx, id, now);
 
       await tx.subscriptionChange.update({
         where: { id: changeId },
@@ -560,7 +566,7 @@ export class SubscriptionsService {
    * keeps the period clock running, so resuming before `endsAt` loses no time.
    */
   async pause(userId: string, id: string): Promise<SubscriptionView> {
-    const now = new Date();
+    const now = this.clock.now();
 
     return this.prisma.$transaction(async (tx) => {
       const subscription = await this.lockOwned(tx, userId, id);
@@ -594,7 +600,7 @@ export class SubscriptionsService {
   }
 
   async resume(userId: string, id: string): Promise<SubscriptionView> {
-    const now = new Date();
+    const now = this.clock.now();
 
     return this.prisma.$transaction(async (tx) => {
       const subscription = await this.lockOwned(tx, userId, id);
@@ -639,7 +645,7 @@ export class SubscriptionsService {
 
   /** Cancelling always stops at the end of the paid term, never immediately. */
   async cancel(userId: string, id: string): Promise<SubscriptionView> {
-    const now = new Date();
+    const now = this.clock.now();
 
     return this.prisma.$transaction(async (tx) => {
       const subscription = await this.lockOwned(tx, userId, id);
@@ -654,7 +660,7 @@ export class SubscriptionsService {
       }
 
       await this.assertNoPaidRenewal(tx, id);
-      await this.closePendingOrders(tx, id);
+      await this.closePendingOrders(tx, id, now);
 
       const last = await tx.subscriptionPeriod.findFirst({
         where: { subscriptionId: id },
@@ -847,12 +853,13 @@ export class SubscriptionsService {
   private closePendingOrders(
     tx: Prisma.TransactionClient,
     subscriptionId: string,
+    now: Date,
   ): Promise<{ count: number }> {
     return tx.order.updateMany({
       where: { subscriptionId, status: 'PENDING' },
       data: {
         status: 'CLOSED',
-        closedAt: new Date(),
+        closedAt: now,
         pendingKey: null,
         renewalKey: null,
       },

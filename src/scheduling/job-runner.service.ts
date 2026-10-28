@@ -4,6 +4,7 @@ import { PinoLogger } from 'nestjs-pino';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { AppConfig } from '../config/app-config.service';
+import { Clock } from '../infra/clock/clock';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OrdersService } from '../orders/orders.service';
@@ -35,6 +36,7 @@ export class JobRunnerService implements OnApplicationShutdown {
     private readonly orders: OrdersService,
     private readonly notifications: NotificationsService,
     private readonly pino: PinoLogger,
+    private readonly clock: Clock,
   ) {}
 
   async run(
@@ -78,7 +80,7 @@ export class JobRunnerService implements OnApplicationShutdown {
             name,
             status: 'SKIPPED',
             instanceId: this.instanceId,
-            finishedAt: new Date(),
+            finishedAt: this.clock.now(),
             durationMs: 0,
             result: { skipped: true },
           },
@@ -92,7 +94,7 @@ export class JobRunnerService implements OnApplicationShutdown {
       return { runId: null, status: 'SKIPPED' };
     }
 
-    const startedAt = new Date();
+    const startedAt = this.clock.now();
     let recordId: string | null = null;
 
     // A job may legitimately outlive the lease; keep pushing it forward so a
@@ -305,7 +307,7 @@ export class JobRunnerService implements OnApplicationShutdown {
     startedAt: Date,
     result: unknown,
   ): Promise<void> {
-    const finishedAt = new Date();
+    const finishedAt = this.clock.now();
     await this.prisma.jobRun
       .update({
         where: { id },
@@ -326,7 +328,7 @@ export class JobRunnerService implements OnApplicationShutdown {
     startedAt: Date,
     error: unknown,
   ): Promise<void> {
-    const finishedAt = new Date();
+    const finishedAt = this.clock.now();
     await this.prisma.jobRun
       .update({
         where: { id },

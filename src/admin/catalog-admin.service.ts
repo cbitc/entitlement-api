@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type PlanVersionStatus } from '@prisma/client';
 import { AppException } from '../common/errors/app.exception';
+import { Clock } from '../infra/clock/clock';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import type {
   AdminCreateFeatureInput,
@@ -131,7 +132,10 @@ const assertUniquePriceTerms = (prices: readonly AdminPriceView[]): void => {
  */
 @Injectable()
 export class CatalogAdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly clock: Clock,
+  ) {}
 
   async listProducts(): Promise<AdminProductView[]> {
     const rows = await this.prisma.product.findMany({
@@ -400,7 +404,7 @@ export class CatalogAdminService {
    */
   async publishVersion(
     id: string,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<AdminVersionView> {
     return this.prisma.$transaction(async (tx) => {
       const initial = await tx.planVersion.findUnique({
@@ -451,7 +455,10 @@ export class CatalogAdminService {
   }
 
   /** No new subscribers, but existing ones keep renewing at these terms. */
-  async closeForSale(id: string, now = new Date()): Promise<AdminVersionView> {
+  async closeForSale(
+    id: string,
+    now = this.clock.now(),
+  ): Promise<AdminVersionView> {
     await this.requireStatus(id, 'PUBLISHED', 'close for sale');
     const updated = await this.prisma.planVersion.update({
       where: { id },
@@ -465,7 +472,10 @@ export class CatalogAdminService {
     return toVersionView(updated);
   }
 
-  async retireVersion(id: string, now = new Date()): Promise<AdminVersionView> {
+  async retireVersion(
+    id: string,
+    now = this.clock.now(),
+  ): Promise<AdminVersionView> {
     await this.requireStatus(id, 'CLOSED_FOR_SALE', 'retire');
     const updated = await this.prisma.planVersion.update({
       where: { id },

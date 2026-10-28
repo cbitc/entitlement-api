@@ -8,6 +8,7 @@ import {
   type JWK,
 } from 'jose';
 import { AppConfig } from '../config/app-config.service';
+import { Clock } from '../infra/clock/clock';
 
 /** Claims a license token carries. `sub` is the owning user id. */
 export interface IssueLicenseTokenInput {
@@ -54,7 +55,10 @@ export class LicenseTokenService implements OnModuleInit {
   private privateKey!: CryptoKey;
   private publicJwk!: LicenseJwk;
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly clock: Clock,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     const settings = this.config.license;
@@ -106,7 +110,7 @@ export class LicenseTokenService implements OnModuleInit {
 
   async issue(
     input: IssueLicenseTokenInput,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<IssuedLicenseToken> {
     const settings = this.config.license;
     const ttlMs = input.offline

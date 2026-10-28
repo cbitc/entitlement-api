@@ -11,6 +11,8 @@ import {
   vi,
 } from 'vitest';
 import { AppModule } from '../src/app.module';
+import { Clock } from '../src/infra/clock/clock';
+import { FakeClock } from './support/fake-clock';
 import { Mailer, type LoginCodeMail } from '../src/infra/mail/mailer';
 import { PrismaService } from '../src/infra/prisma/prisma.service';
 
@@ -83,6 +85,8 @@ describe('Auth (e2e)', () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(Mailer)
       .useValue(mailer)
+      .overrideProvider(Clock)
+      .useValue(new FakeClock())
       .compile();
 
     app = moduleRef.createNestApplication<NestExpressApplication>();

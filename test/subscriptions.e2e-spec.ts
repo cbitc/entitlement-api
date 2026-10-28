@@ -4,6 +4,8 @@ import type { PlanInterval } from '@prisma/client';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
+import { Clock } from '../src/infra/clock/clock';
+import { FakeClock } from './support/fake-clock';
 import { SessionTokenService } from '../src/auth/session-token.service';
 import { PrismaService } from '../src/infra/prisma/prisma.service';
 import { OrdersService } from '../src/orders/orders.service';
@@ -18,6 +20,9 @@ describe('Subscriptions and payments (e2e)', () => {
   let prisma: PrismaService;
   let tokens: SessionTokenService;
   let orders: OrdersService;
+
+  /** Drives every service that does not take an explicit `now`. */
+  const clock = new FakeClock();
 
   let notifySeq = 0;
 
@@ -194,7 +199,10 @@ describe('Subscriptions and payments (e2e)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(Clock)
+      .useValue(clock)
+      .compile();
 
     app = moduleRef.createNestApplication<NestExpressApplication>();
     await app.init();
@@ -205,6 +213,7 @@ describe('Subscriptions and payments (e2e)', () => {
 
   beforeEach(async () => {
     notifySeq = 0;
+    clock.reset();
     await prisma.outboundNotification.deleteMany();
     await prisma.jobRun.deleteMany();
     await prisma.jobLock.deleteMany();
@@ -447,6 +456,42 @@ describe('Subscriptions and payments (e2e)', () => {
     // The trial is spent even when the subscription later ends.
     const secondTrial = await createTrial(token).expect(409);
     expect(secondTrial.body.error.type).toBe('TrialAlreadyUsed');
+  });
+
+  it('settles a boundary the injected clock reports, via the admin job route', async () => {
+    await seedCatalogue();
+    const { token } = await signIn('clock-buyer@example.com');
+    const { token: adminToken } = await signIn(
+      'clock-admin@example.com',
+      'ADMIN',
+    );
+
+    const trial = await createTrial(token).expect(201);
+    const endsAt = trial.body.currentPeriod.endsAt as string;
+
+    const runSettle = () =>
+      http()
+        .post('/admin/jobs/settle/run')
+        .set(auth(adminToken))
+        .send({ limit: 10 })
+        .expect(200);
+
+    // Before the boundary nothing is due, even though the request is served.
+    const early = await runSettle();
+    expect(early.body).toMatchObject({
+      fulfilled: 0,
+      canceled: 0,
+      expired: 0,
+    });
+
+    // The job reads the injected clock, not the host clock: the same call now
+    // sees the finished period and expires it.
+    clock.set(atBoundary(endsAt));
+    const settled = await runSettle();
+    expect(settled.body.expired).toBe(1);
+
+    const expired = await getSubscription(token, trial.body.id).expect(200);
+    expect(expired.body.status).toBe('EXPIRED');
   });
 
   it('keeps renewing the pinned version after a new one is published', async () => {

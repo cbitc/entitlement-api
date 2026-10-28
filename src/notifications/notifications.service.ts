@@ -12,6 +12,7 @@ import {
   type Pagination,
 } from '../common/http/pagination';
 import { AppConfig } from '../config/app-config.service';
+import { Clock } from '../infra/clock/clock';
 import { Mailer } from '../infra/mail/mailer';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import { renderNotification } from './templates';
@@ -61,6 +62,7 @@ export class NotificationsService {
     private readonly prisma: PrismaService,
     private readonly mailer: Mailer,
     private readonly config: AppConfig,
+    private readonly clock: Clock,
   ) {}
 
   /** Receipt for a captured payment, whether new or a renewal. */
@@ -124,7 +126,7 @@ export class NotificationsService {
       interval: order.interval,
       amountCents: order.amountCents,
       currency: order.currency,
-      paidAt: (order.paidAt ?? new Date()).toISOString(),
+      paidAt: (order.paidAt ?? this.clock.now()).toISOString(),
       startsAt,
       endsAt,
     };
@@ -219,7 +221,7 @@ export class NotificationsService {
       amountCents: refund.amountCents,
       currency: refund.currency,
       reason: refund.reason,
-      completedAt: (refund.completedAt ?? new Date()).toISOString(),
+      completedAt: (refund.completedAt ?? this.clock.now()).toISOString(),
     };
 
     await this.enqueue(tx, {

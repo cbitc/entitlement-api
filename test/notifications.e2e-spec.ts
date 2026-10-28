@@ -4,6 +4,8 @@ import type { PlanInterval } from '@prisma/client';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
+import { Clock } from '../src/infra/clock/clock';
+import { FakeClock } from './support/fake-clock';
 import { SessionTokenService } from '../src/auth/session-token.service';
 import { AppConfig } from '../src/config/app-config.service';
 import { PrismaService } from '../src/infra/prisma/prisma.service';
@@ -118,7 +120,10 @@ describe('Outbound notifications (e2e)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(Clock)
+      .useValue(new FakeClock())
+      .compile();
 
     app = moduleRef.createNestApplication<NestExpressApplication>();
     await app.init();

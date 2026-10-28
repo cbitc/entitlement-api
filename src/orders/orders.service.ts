@@ -9,6 +9,7 @@ import {
   type Pagination,
 } from '../common/http/pagination';
 import { AppConfig } from '../config/app-config.service';
+import { Clock } from '../infra/clock/clock';
 import { PaymentGateway } from '../infra/payments/payment-gateway';
 import type {
   PaymentNotificationPayload,
@@ -66,12 +67,11 @@ export interface AdminOrderFilter {
   readonly to?: Date;
 }
 
-const newOrderNumber = (): string =>
-  `${ORDER_NUMBER_PREFIX}${Date.now().toString(36).toUpperCase()}${randomBytes(
-    4,
-  )
-    .toString('hex')
-    .toUpperCase()}`;
+const newOrderNumber = (now: Date): string =>
+  `${ORDER_NUMBER_PREFIX}${now
+    .getTime()
+    .toString(36)
+    .toUpperCase()}${randomBytes(4).toString('hex').toUpperCase()}`;
 
 const addMinutes = (from: Date, minutes: number): Date =>
   new Date(from.getTime() + minutes * 60_000);
@@ -138,6 +138,7 @@ export class OrdersService {
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly fulfillment: OrderFulfillmentService,
     private readonly notifications: NotificationsService,
+    private readonly clock: Clock,
   ) {}
 
   async listForUser(userId: string): Promise<OrderView[]> {
@@ -209,7 +210,7 @@ export class OrdersService {
   async create(
     userId: string,
     input: CreateOrderInput,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<OrderView> {
     const product = await this.prisma.product.findUnique({
       where: { code: input.productCode },
@@ -269,7 +270,7 @@ export class OrdersService {
     try {
       const order = await this.prisma.order.create({
         data: {
-          number: newOrderNumber(),
+          number: newOrderNumber(now),
           userId,
           productId: product.id,
           kind: 'NEW_SUBSCRIPTION',
@@ -298,7 +299,7 @@ export class OrdersService {
   async cancel(
     userId: string,
     id: string,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<OrderView> {
     const order = await this.prisma.order.findFirst({
       where: { id, userId },
@@ -331,7 +332,7 @@ export class OrdersService {
   async createPayment(
     userId: string,
     id: string,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<CheckoutView> {
     const order = await this.prisma.order.findFirst({
       where: { id, userId },
@@ -429,13 +430,14 @@ export class OrdersService {
       return false;
     }
 
+    const now = this.clock.now();
     const verified = this.gateway.verifyNotification(payload);
     if (!verified) {
-      await this.recordRejected(parsed, payload);
+      await this.recordRejected(parsed, payload, now);
       return false;
     }
 
-    return this.applyNotification(parsed, payload, new Date());
+    return this.applyNotification(parsed, payload, now);
   }
 
   /** Admin-only: refunds part or all of a captured payment. */
@@ -443,7 +445,7 @@ export class OrdersService {
     adminUserId: string,
     orderId: string,
     input: RefundOrderInput,
-    now = new Date(),
+    now = this.clock.now(),
   ): Promise<AdminOrderView> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -591,7 +593,7 @@ export class OrdersService {
    * job recreates the order with the new terms.
    */
   async createRenewalOrders(
-    now = new Date(),
+    now = this.clock.now(),
     limit = 200,
   ): Promise<{ created: number; skipped: number }> {
     const cutoff = new Date(
@@ -678,7 +680,7 @@ export class OrdersService {
 
           const order = await tx.order.create({
             data: {
-              number: newOrderNumber(),
+              number: newOrderNumber(now),
               userId: period.subscription.userId,
               productId: period.subscription.productId,
               subscriptionId: period.subscriptionId,
@@ -722,7 +724,7 @@ export class OrdersService {
    * Per-subscription failures are logged, never allowed to stop the batch.
    */
   async settleDueSubscriptions(
-    now = new Date(),
+    now = this.clock.now(),
     limit = 200,
   ): Promise<{
     fulfilled: number;
@@ -879,7 +881,7 @@ export class OrdersService {
 
   /** Closes checkouts that were never paid. */
   async expireOrders(
-    now = new Date(),
+    now = this.clock.now(),
     limit = 200,
   ): Promise<{ closed: number }> {
     const pending = await this.prisma.order.findMany({
@@ -911,12 +913,15 @@ export class OrdersService {
    * Callbacks can be lost or unreachable (a local sandbox cannot be called
    * back), so the provider is asked directly and the same capture path is used.
    */
-  sync(userId: string, id: string, now = new Date()): Promise<OrderView> {
+  sync(userId: string, id: string, now = this.clock.now()): Promise<OrderView> {
     return this.reconcile(id, now, userId);
   }
 
   /** Support-triggered reconciliation: same path, no ownership filter. */
-  async syncAsAdmin(id: string, now = new Date()): Promise<AdminOrderView> {
+  async syncAsAdmin(
+    id: string,
+    now = this.clock.now(),
+  ): Promise<AdminOrderView> {
     await this.reconcile(id, now, null);
     return this.getAny(id);
   }
@@ -988,7 +993,7 @@ export class OrdersService {
    * A captured payment is applied even if the callback is still in flight.
    */
   async syncPendingOrders(
-    now = new Date(),
+    now = this.clock.now(),
     limit = 100,
   ): Promise<{ synced: number; pending: number; failed: number }> {
     const windowStart = new Date(
@@ -1091,6 +1096,7 @@ export class OrdersService {
             notification.id,
             'IGNORED',
             'ORDER_NOT_FOUND',
+            now,
           );
           return true;
         }
@@ -1108,6 +1114,7 @@ export class OrdersService {
             notification.id,
             'IGNORED',
             `EVENT_${parsed.eventType}`,
+            now,
             order.id,
           );
           return true;
@@ -1119,6 +1126,7 @@ export class OrdersService {
           notification.id,
           outcome.status,
           outcome.reason,
+          now,
           outcome.orderId,
           outcome.paymentId,
         );
@@ -1333,18 +1341,20 @@ export class OrdersService {
   private async recordRejected(
     parsed: PaymentNotificationPayload,
     payload: Readonly<Record<string, string>>,
+    now: Date,
   ): Promise<void> {
     try {
       await this.prisma.paymentNotification.create({
         data: {
           provider: this.gateway.provider,
-          externalId: parsed.externalId || `INVALID-${Date.now()}`,
+          externalId:
+            parsed.externalId || `INVALID-${now.getTime().toString(36)}`,
           verified: false,
           eventType: parsed.eventType,
           payload: payload as Prisma.InputJsonObject,
           status: 'FAILED',
           errorMessage: 'INVALID_SIGNATURE',
-          processedAt: new Date(),
+          processedAt: now,
         },
       });
     } catch (error) {
@@ -1361,6 +1371,7 @@ export class OrdersService {
     id: string,
     status: 'PROCESSED' | 'IGNORED' | 'FAILED',
     errorMessage: string | null,
+    now: Date,
     orderId?: string,
     paymentId?: string,
   ): Promise<unknown> {
@@ -1371,7 +1382,7 @@ export class OrdersService {
         errorMessage,
         orderId: orderId ?? null,
         paymentId: paymentId ?? null,
-        processedAt: new Date(),
+        processedAt: now,
       },
     });
   }

@@ -1,3 +1,4 @@
+import { Clock } from '../clock/clock';
 import { PaymentGateway } from './payment-gateway';
 import type {
   PaymentInstruction,
@@ -19,6 +20,10 @@ import { yuanToCents } from './amount';
  */
 export class LogPaymentGateway extends PaymentGateway {
   readonly provider = 'ALIPAY' as const;
+
+  constructor(private readonly clock: Clock) {
+    super();
+  }
 
   async createPayment(request: PaymentRequest): Promise<PaymentInstruction> {
     return {
@@ -49,7 +54,9 @@ export class LogPaymentGateway extends PaymentGateway {
       providerTradeNo: payload.trade_no ?? payload.providerTradeNo,
       amountCents,
       currency: payload.currency ?? 'cny',
-      paidAt: payload.gmt_payment ? new Date(payload.gmt_payment) : new Date(),
+      paidAt: payload.gmt_payment
+        ? new Date(payload.gmt_payment)
+        : this.clock.now(),
       buyerId: payload.buyer_id,
     };
   }

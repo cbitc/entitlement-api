@@ -12,6 +12,7 @@ import {
   type Page,
   type Pagination,
 } from '../common/http/pagination';
+import { Clock } from '../infra/clock/clock';
 import { PrismaService } from '../infra/prisma/prisma.service';
 import type { UpdateProfileInput } from './users.schemas';
 
@@ -27,7 +28,10 @@ export interface UserListFilter {
  */
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly clock: Clock,
+  ) {}
 
   findById(id: string): Promise<User | null> {
     return this.prisma.user.findUnique({ where: { id } });
@@ -48,7 +52,7 @@ export class UsersService {
    */
   async registerSuccessfulLogin(
     email: string,
-    now: Date = new Date(),
+    now: Date = this.clock.now(),
   ): Promise<User> {
     const existing = await this.prisma.user.findUnique({ where: { email } });
 
