@@ -6,6 +6,7 @@ import {
   createVerify,
   type KeyObject,
 } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { AppConfig } from '../../config/app-config.service';
 import { centsToYuan, yuanToCents } from './amount';
 import { PaymentGateway } from './payment-gateway';
@@ -124,8 +125,25 @@ const readAlipayResponse = async (
     text = buffer.toString('utf8');
   }
 
-  const parsed = JSON.parse(text) as Record<string, unknown>;
-  return { body: parsed, node: extractNodeBytes(buffer, nodeKey) };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // The gateway answers with an HTML error page when the request is rejected
+    // before the API layer (bad app_id, bad signature, clock skew, WAF, 5xx).
+    // Keep enough of it to tell those apart in the log without dumping a page.
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(
+      `Alipay returned a non-JSON response (HTTP ${response.status}, ${
+        contentType || 'no content-type'
+      }): ${preview || '<empty body>'}`,
+    );
+  }
+
+  return {
+    body: parsed as Record<string, unknown>,
+    node: extractNodeBytes(buffer, nodeKey),
+  };
 };
 
 /**
@@ -154,11 +172,26 @@ const extractNodeBytes = (buffer: Buffer, key: string): Buffer | null => {
   return buffer.subarray(start, end);
 };
 
+/** Host and path only: the error must never echo a URL with credentials. */
+const endpointOf = (raw: string): string => {
+  try {
+    const url = new URL(raw);
+    return `${url.host}${url.pathname}`;
+  } catch {
+    return 'invalid-url';
+  }
+};
+
 export class AlipayGateway extends PaymentGateway {
   readonly provider = 'ALIPAY' as const;
+  private readonly logger = new Logger(AlipayGateway.name);
 
   constructor(private readonly config: AppConfig) {
     super();
+    this.logger.debug(
+      { gateway: endpointOf(config.alipay.gatewayUrl) },
+      'Alipay gateway configured',
+    );
   }
 
   async createPayment(request: PaymentRequest): Promise<PaymentInstruction> {
@@ -228,6 +261,52 @@ export class AlipayGateway extends PaymentGateway {
     };
   }
 
+  /**
+   * `alipay.trade.query` is read-only, so one retry is safe. The sandbox
+   * sometimes answers with an HTML page (WAF/5xx) instead of JSON; without the
+   * retry that turns into a scheduler warning even though the next sweep would
+   * recover.
+   */
+  private async readQueryResponse(
+    gatewayUrl: string,
+    params: Record<string, string>,
+  ): Promise<{ body: Record<string, unknown>; node: Buffer | null }> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await fetch(gatewayUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+        },
+        body: new URLSearchParams(params).toString(),
+      });
+
+      try {
+        return await readAlipayResponse(
+          response,
+          'alipay_trade_query_response',
+        );
+      } catch (error) {
+        lastError = error;
+        const transient =
+          response.status >= 500 ||
+          (error instanceof Error && error.message.includes('non-JSON'));
+        if (!transient || attempt === 1) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    throw new Error(
+      `Alipay trade query failed (${endpointOf(gatewayUrl)}): ${
+        lastError instanceof Error ? lastError.message : String(lastError)
+      }`,
+    );
+  }
+
   async queryPayment(orderNumber: string): Promise<ProviderPaymentStatus> {
     const alipay = this.config.alipay;
     const params: Record<string, string> = {
@@ -242,22 +321,10 @@ export class AlipayGateway extends PaymentGateway {
     };
     params.sign = this.sign(params);
 
-    const response = await fetch(alipay.gatewayUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(params).toString(),
-    });
-
-    let parsed: { body: Record<string, unknown>; node: Buffer | null };
-    try {
-      parsed = await readAlipayResponse(
-        response,
-        'alipay_trade_query_response',
-      );
-    } catch {
-      throw new Error('Alipay returned a non-JSON response');
-    }
-    const { body, node } = parsed;
+    const { body, node } = await this.readQueryResponse(
+      alipay.gatewayUrl,
+      params,
+    );
     const queryResponse = body.alipay_trade_query_response as
       Record<string, unknown> | undefined;
     if (!queryResponse) {
