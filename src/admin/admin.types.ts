@@ -73,3 +73,19 @@ export interface AdminFeatureView {
   readonly description: string | null;
   readonly createdAt: string;
 }
+
+/**
+ * The application clock as the console sees it.
+ *
+ * `now` and `realNow` are returned together so the UI can show the drift, and
+ * `enabled` distinguishes "the feature is off" from "time is on the wall
+ * clock", which otherwise look identical.
+ */
+export interface ClockStateView {
+  readonly enabled: boolean;
+  readonly controlled: boolean;
+  readonly now: string;
+  readonly realNow: string;
+  readonly offsetMs: number;
+  readonly pinnedAt: string | null;
+}

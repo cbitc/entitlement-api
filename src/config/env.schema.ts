@@ -58,6 +58,11 @@ export const envSchema = z
     // (`POST /admin/jobs/:name/run`); tests disable it by default so timers
     // never race the assertions.
     SCHEDULER_ENABLED: z.enum(['true', 'false']).optional(),
+    // Lets an administrator move the application clock for integration testing
+    // (`POST /admin/clock`). Development only: production refuses to boot with
+    // it on, so a copied `.env` cannot silently ship a time machine.
+    CLOCK_CONTROL_ENABLED: z.enum(['true', 'false']).optional(),
+
     JOB_SETTLE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
     JOB_RENEWAL_ORDERS_INTERVAL_MS: z.coerce
       .number()
@@ -247,6 +252,17 @@ export const envSchema = z
         message: 'LICENSE_JWT_PRIVATE_KEY is required in production',
       });
     }
+
+    // Moving the application clock is a testing tool, never a production
+    // feature: it would let a compromised admin account backdate or postdate
+    // every subscription.
+    if (production && env.CLOCK_CONTROL_ENABLED === 'true') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CLOCK_CONTROL_ENABLED'],
+        message: 'CLOCK_CONTROL_ENABLED must be off in production',
+      });
+    }
   })
   .transform((env) => ({
     ...env,
@@ -277,6 +293,11 @@ export const envSchema = z
       env.SCHEDULER_ENABLED === undefined
         ? env.NODE_ENV !== 'test'
         : env.SCHEDULER_ENABLED === 'true',
+    // Off by default everywhere: a developer opts in per environment.
+    CLOCK_CONTROL_ENABLED:
+      env.CLOCK_CONTROL_ENABLED === undefined
+        ? false
+        : env.CLOCK_CONTROL_ENABLED === 'true',
     LOG_HTTP_SUCCESS:
       env.LOG_HTTP_SUCCESS === undefined
         ? true

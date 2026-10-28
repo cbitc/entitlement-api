@@ -6,6 +6,7 @@ import { SchedulingModule } from '../scheduling/scheduling.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { UsersModule } from '../users/users.module';
 import { AdminCatalogController } from './admin.catalog.controller';
+import { AdminClockController } from './admin.clock.controller';
 import { AdminController } from './admin.controller';
 import { CatalogAdminService } from './catalog-admin.service';
 
@@ -25,7 +26,7 @@ import { CatalogAdminService } from './catalog-admin.service';
     NotificationsModule,
     SchedulingModule,
   ],
-  controllers: [AdminController, AdminCatalogController],
+  controllers: [AdminController, AdminCatalogController, AdminClockController],
   providers: [CatalogAdminService],
 })
 export class AdminModule {}

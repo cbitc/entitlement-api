@@ -28,7 +28,7 @@ export default tseslint.config(
     files: ['src/**/*.ts'],
     ignores: [
       'src/**/*.spec.ts',
-      'src/infra/clock/system-clock.ts',
+      'src/infra/clock/**',
       'src/infra/payments/alipay.gateway.ts',
       'src/scheduling/job-lock.service.ts',
       'src/health/health.controller.ts',

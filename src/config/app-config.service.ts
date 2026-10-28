@@ -84,6 +84,11 @@ export class AppConfig {
     return this.value('SCHEDULER_ENABLED');
   }
 
+  /** Whether `POST /admin/clock` may move the application clock. */
+  get clockControlEnabled(): boolean {
+    return this.value('CLOCK_CONTROL_ENABLED');
+  }
+
   get jobs(): {
     settleIntervalMs: number;
     renewalOrdersIntervalMs: number;

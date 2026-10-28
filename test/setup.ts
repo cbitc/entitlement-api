@@ -18,5 +18,9 @@ process.env.LICENSE_OFFLINE_TTL_DAYS ??= '30';
 process.env.PAYMENT_PROVIDER ??= 'log';
 // Timers must never race the assertions; tests call the job runner directly.
 process.env.SCHEDULER_ENABLED ??= 'false';
+// e2e may move the application clock through `POST /admin/clock`. This is read
+// when `ConfigModule.forRoot` validates the environment, which happens at
+// module import time, so it has to be set here rather than in a hook.
+process.env.CLOCK_CONTROL_ENABLED ??= 'true';
 process.env.NOTIFICATION_TIME_ZONE ??= 'Asia/Shanghai';
 process.env.WEB_APP_URL ??= 'http://localhost:5173';

@@ -71,6 +71,52 @@ export const adminJobRunQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+/* Clock (integration testing) -------------------------------------------- */
+
+/** A year either way is already far beyond any renewal or trial window. */
+const MAX_CLOCK_SHIFT_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Exactly one intent per call, so the resulting state is never ambiguous:
+ * `now` freezes time, `offsetMs` shifts the running clock, `reset` returns to
+ * the wall clock.
+ */
+export const adminSetClockSchema = z
+  .object({
+    now: z.coerce.date().optional(),
+    offsetMs: z.coerce
+      .number()
+      .int()
+      .min(-MAX_CLOCK_SHIFT_MS)
+      .max(MAX_CLOCK_SHIFT_MS)
+      .optional(),
+    reset: z.literal(true).optional(),
+  })
+  .refine(
+    (value) =>
+      [value.now, value.offsetMs, value.reset].filter(
+        (field) => field !== undefined,
+      ).length === 1,
+    { message: 'Send exactly one of: now, offsetMs, reset' },
+  );
+
+/** Human-friendly travel: any combination of units is summed. */
+export const adminAdvanceClockSchema = z
+  .object({
+    ms: z.coerce.number().int().optional(),
+    seconds: z.coerce.number().int().optional(),
+    minutes: z.coerce.number().int().optional(),
+    hours: z.coerce.number().int().optional(),
+    days: z.coerce.number().int().min(-365).max(365).optional(),
+  })
+  .refine(
+    (value) =>
+      [value.ms, value.seconds, value.minutes, value.hours, value.days].some(
+        (field) => field !== undefined,
+      ),
+    { message: 'Send at least one of: ms, seconds, minutes, hours, days' },
+  );
+
 /* Notifications ---------------------------------------------------------- */
 
 export const adminNotificationQuerySchema = paginationSchema.extend({
@@ -91,6 +137,8 @@ export type AdminNotificationParams = z.output<
   typeof adminNotificationParamsSchema
 >;
 export type AdminJobRunQuery = z.output<typeof adminJobRunQuerySchema>;
+export type AdminSetClockInput = z.output<typeof adminSetClockSchema>;
+export type AdminAdvanceClockInput = z.output<typeof adminAdvanceClockSchema>;
 
 /* Licenses --------------------------------------------------------------- */
 
