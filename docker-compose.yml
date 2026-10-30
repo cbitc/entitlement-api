@@ -16,6 +16,8 @@ services:
       - --default-time-zone=+08:00
     volumes:
       - mysql-data:/var/lib/mysql
+      # Creates `entitlement_test` on the first boot of an empty volume; grant
+      # statements are only needed because MYSQL_USER is scoped to one schema.
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
@@ -25,5 +27,37 @@ services:
       retries: 20
       start_period: 20s
 
+  # Development identity provider for the OIDC SSO login flow.
+  #
+  # The realm in ./docker/keycloak is imported on the first boot only. After
+  # changing it, drop the Keycloak volume and start again (see
+  # docker/keycloak/README.md); MySQL data is untouched.
+  # The issuer is pinned to http://localhost:8080/realms/entitlement so it
+  # matches the API's `SSO_ISSUER` default.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    container_name: entitlement-api-keycloak
+    restart: unless-stopped
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8080
+      KC_HTTP_PORT: '8080'
+    ports:
+      - '8080:8080'
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'exec 3<>/dev/tcp/127.0.0.1/8080']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
 volumes:
   mysql-data:
+  keycloak-data:
