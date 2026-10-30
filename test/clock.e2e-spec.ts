@@ -31,7 +31,8 @@ const createTables = async (prisma: PrismaService): Promise<void> => {
   await prisma.feature.deleteMany();
   await prisma.plan.deleteMany();
   await prisma.product.deleteMany();
-  await prisma.verificationCode.deleteMany();
+  await prisma.loginTicket.deleteMany();
+  await prisma.externalIdentity.deleteMany();
   await prisma.user.deleteMany();
 };
 

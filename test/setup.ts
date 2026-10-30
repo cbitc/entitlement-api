@@ -6,6 +6,13 @@ process.env.NODE_ENV ??= 'test';
 process.env.DATABASE_URL ??=
   'mysql://entitlement:entitlement@localhost:3306/entitlement_test';
 process.env.JWT_SECRET ??= 'test-only-jwt-secret-with-32-characters';
+// SSO is the only login path; point it at a placeholder so a developer's local
+// `.env` (a real Keycloak) never leaks into a test run. `sso.e2e-spec.ts`
+// overrides the issuer with its local provider before importing AppModule.
+process.env.SSO_ISSUER ??= 'http://127.0.0.1:9/oidc';
+process.env.SSO_CLIENT_ID ??= 'entitlement-api';
+process.env.SSO_CLIENT_SECRET ??= 'test-only-sso-client-secret';
+process.env.SSO_REDIRECT_URI ??= 'http://localhost:3000/auth/sso/callback';
 process.env.MAIL_TRANSPORT ??= 'log';
 process.env.LOG_LEVEL ??= 'silent';
 // Licensing defaults must be deterministic even when a developer's .env

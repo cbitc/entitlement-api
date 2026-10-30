@@ -112,6 +112,40 @@ export const envSchema = z
     JWT_AUDIENCE: z.string().min(1).default('entitlement-api'),
     JWT_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 
+    // Single sign-on (OIDC authorization code + PKCE). This API is the relying
+    // party: it never stores passwords and never touches the IdP session.
+    // `SSO_ISSUER` must match the IdP's `iss` claim byte for byte.
+    SSO_ISSUER: z.url().default('http://localhost:8080/realms/entitlement'),
+    SSO_CLIENT_ID: z.string().min(1).default('entitlement-api'),
+    /** Public (PKCE-only) clients may leave this empty; production may not. */
+    SSO_CLIENT_SECRET: z.string().default(''),
+    SSO_REDIRECT_URI: z
+      .url()
+      .default('http://localhost:3000/auth/sso/callback'),
+    SSO_SCOPES: z.string().min(1).default('openid profile email'),
+    /** Lifetime of the signed state that binds a browser to one login attempt. */
+    SSO_STATE_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(3600)
+      .default(600),
+    /** Lifetime of the one-time ticket handed to the SPA after the callback. */
+    SSO_TICKET_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(300)
+      .default(60),
+    SSO_HTTP_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(30_000)
+      .default(5000),
+    /** Comma separated allow-list; empty accepts every verified address. */
+    SSO_ALLOWED_EMAIL_DOMAINS: z.string().default(''),
+
     // License tokens (EdDSA/Ed25519), independent from the HS256 session
     // tokens above. The key is a PKCS#8 PEM or its raw base64 DER. Production
     // must configure it; development and tests fall back to an ephemeral key.
@@ -128,10 +162,8 @@ export const envSchema = z
       .max(365)
       .default(30),
 
-    // Key for the verification-code HMAC. Falls back to JWT_SECRET.
-    VERIFICATION_CODE_SECRET: z.string().min(32).optional(),
-
-    // `log` prints the code instead of sending mail: development and test only.
+    // `log` prints the message instead of sending mail: development and test
+    // only.
     MAIL_TRANSPORT: z.enum(['log', 'smtp']).optional(),
     SMTP_HOST: z.string().default(''),
     SMTP_PORT: z.coerce.number().int().positive().default(587),
@@ -201,7 +233,35 @@ export const envSchema = z
       });
     }
 
-    // A login code in the log stream would be a credential leak.
+    // The whole login flow now depends on the IdP: an unreachable issuer at
+    // boot is a configuration error, and an http issuer in production would
+    // expose the authorization code and the tokens to the network.
+    if (production) {
+      if (!env.SSO_ISSUER.startsWith('https://')) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SSO_ISSUER'],
+          message: 'SSO_ISSUER must use https in production',
+        });
+      }
+      if (!env.SSO_REDIRECT_URI.startsWith('https://')) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SSO_REDIRECT_URI'],
+          message: 'SSO_REDIRECT_URI must use https in production',
+        });
+      }
+      if (env.SSO_CLIENT_SECRET.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SSO_CLIENT_SECRET'],
+          message: 'SSO_CLIENT_SECRET is required in production',
+        });
+      }
+    }
+
+    // A message body in the log stream is customer data; production must use
+    // a real transport.
     const transport = env.MAIL_TRANSPORT ?? (production ? 'smtp' : 'log');
     if (production && transport !== 'smtp') {
       ctx.addIssue({
@@ -267,6 +327,9 @@ export const envSchema = z
   .transform((env) => ({
     ...env,
     CORS_ORIGINS: splitCsv(env.CORS_ORIGINS),
+    SSO_ALLOWED_EMAIL_DOMAINS: splitCsv(
+      env.SSO_ALLOWED_EMAIL_DOMAINS.toLowerCase(),
+    ),
     // Humans read pretty logs; log shippers need JSON. Production never gets
     // colours, regardless of what the environment claims.
     LOG_FORMAT:

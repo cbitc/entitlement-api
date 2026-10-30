@@ -231,7 +231,8 @@ describe('Subscriptions and payments (e2e)', () => {
     await prisma.feature.deleteMany();
     await prisma.plan.deleteMany();
     await prisma.product.deleteMany();
-    await prisma.verificationCode.deleteMany();
+    await prisma.loginTicket.deleteMany();
+    await prisma.externalIdentity.deleteMany();
     await prisma.user.deleteMany();
   });
 

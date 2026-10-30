@@ -14,6 +14,9 @@ const productionEnv = {
   ALIPAY_PRIVATE_KEY: 'private-key',
   ALIPAY_PUBLIC_KEY: 'public-key',
   LICENSE_JWT_PRIVATE_KEY: 'test-license-key',
+  SSO_ISSUER: 'https://idp.example/realms/entitlement',
+  SSO_CLIENT_SECRET: 'test-only-sso-client-secret',
+  SSO_REDIRECT_URI: 'https://api.example/auth/sso/callback',
 };
 
 describe('validateEnv', () => {
@@ -97,12 +100,46 @@ describe('validateEnv', () => {
     ).toThrow(/CORS_ORIGINS/);
   });
 
+  it('defaults the SSO relying-party settings', () => {
+    const env = validateEnv(baseEnv);
+
+    expect(env.SSO_ISSUER).toBe('http://localhost:8080/realms/entitlement');
+    expect(env.SSO_CLIENT_ID).toBe('entitlement-api');
+    expect(env.SSO_STATE_TTL_SECONDS).toBe(600);
+    expect(env.SSO_TICKET_TTL_SECONDS).toBe(60);
+    expect(env.SSO_ALLOWED_EMAIL_DOMAINS).toEqual([]);
+  });
+
+  it('splits the allowed email domains', () => {
+    const env = validateEnv({
+      ...baseEnv,
+      SSO_ALLOWED_EMAIL_DOMAINS: 'Example.com, corp.example ,',
+    });
+
+    expect(env.SSO_ALLOWED_EMAIL_DOMAINS).toEqual([
+      'example.com',
+      'corp.example',
+    ]);
+  });
+
+  it('refuses an insecure issuer in production', () => {
+    expect(() =>
+      validateEnv({ ...productionEnv, SSO_ISSUER: 'http://idp.example' }),
+    ).toThrow(/SSO_ISSUER/);
+  });
+
+  it('requires an SSO client secret in production', () => {
+    expect(() =>
+      validateEnv({ ...productionEnv, SSO_CLIENT_SECRET: '' }),
+    ).toThrow(/SSO_CLIENT_SECRET/);
+  });
+
   it('defaults the mail transport by environment', () => {
     expect(validateEnv(baseEnv).MAIL_TRANSPORT).toBe('log');
     expect(validateEnv(productionEnv).MAIL_TRANSPORT).toBe('smtp');
   });
 
-  it('refuses to print login codes in production', () => {
+  it('refuses the log mail transport in production', () => {
     expect(() =>
       validateEnv({ ...productionEnv, MAIL_TRANSPORT: 'log' }),
     ).toThrow(/MAIL_TRANSPORT/);

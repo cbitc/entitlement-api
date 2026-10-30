@@ -80,6 +80,11 @@ export class AppConfig {
     return this.value('THROTTLE_LIMIT');
   }
 
+  /** Browser-facing portal; SSO redirects land here. */
+  get webAppUrl(): string {
+    return this.value('WEB_APP_URL');
+  }
+
   get schedulerEnabled(): boolean {
     return this.value('SCHEDULER_ENABLED');
   }
@@ -139,9 +144,28 @@ export class AppConfig {
     return this.value('JWT_TTL_SECONDS');
   }
 
-  /** Key material for the verification-code HMAC, with a safe fallback. */
-  get verificationCodeSecret(): string {
-    return this.value('VERIFICATION_CODE_SECRET') ?? this.jwtSecret;
+  get sso(): {
+    issuer: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+    scopes: string[];
+    stateTtlSeconds: number;
+    ticketTtlSeconds: number;
+    httpTimeoutMs: number;
+    allowedEmailDomains: string[];
+  } {
+    return {
+      issuer: this.value('SSO_ISSUER'),
+      clientId: this.value('SSO_CLIENT_ID'),
+      clientSecret: this.value('SSO_CLIENT_SECRET'),
+      redirectUri: this.value('SSO_REDIRECT_URI'),
+      scopes: this.value('SSO_SCOPES').split(/\s+/).filter(Boolean),
+      stateTtlSeconds: this.value('SSO_STATE_TTL_SECONDS'),
+      ticketTtlSeconds: this.value('SSO_TICKET_TTL_SECONDS'),
+      httpTimeoutMs: this.value('SSO_HTTP_TIMEOUT_MS'),
+      allowedEmailDomains: this.value('SSO_ALLOWED_EMAIL_DOMAINS'),
+    };
   }
 
   get license(): {

@@ -3,12 +3,14 @@ import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { AppConfig } from '../config/app-config.service';
 import { UsersModule } from '../users/users.module';
-import { VerificationModule } from '../verification/verification.module';
-import { AuthController } from './auth.controller';
-import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { RolesGuard } from './roles.guard';
 import { SessionTokenService } from './session-token.service';
+import { LoginTicketService } from './sso/login-ticket.service';
+import { OidcClient } from './sso/oidc.client';
+import { SsoController } from './sso/sso.controller';
+import { SsoService } from './sso/sso.service';
+import { SsoStateService } from './sso/sso-state.service';
 
 @Module({
   imports: [
@@ -24,12 +26,14 @@ import { SessionTokenService } from './session-token.service';
       }),
     }),
     UsersModule,
-    VerificationModule,
   ],
-  controllers: [AuthController],
+  controllers: [SsoController],
   providers: [
-    AuthService,
     SessionTokenService,
+    OidcClient,
+    SsoStateService,
+    SsoService,
+    LoginTicketService,
     // Registered here (not in AppModule) so the guards resolve against this
     // module's imports, which keeps users free of any auth dependency.
     { provide: APP_GUARD, useClass: JwtAuthGuard },

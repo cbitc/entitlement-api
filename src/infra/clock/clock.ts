@@ -2,8 +2,8 @@
  * The only source of "now" for business logic.
  *
  * Reading the wall clock directly (`new Date()`) makes time-dependent rules —
- * trial expiry, period boundaries, checkout deadlines, verification-code
- * throttling — impossible to drive from a test without touching the database
+ * trial expiry, period boundaries, checkout deadlines, login-ticket expiry —
+ * impossible to drive from a test without touching the database
  * or the host clock. Injecting this port instead means a test can place the
  * application at any instant and exercise the same code path production uses.
  *

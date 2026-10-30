@@ -60,7 +60,8 @@ describe('Scheduled job runner (e2e)', () => {
     await prisma.outboundNotification.deleteMany();
     await prisma.jobRun.deleteMany();
     await prisma.jobLock.deleteMany();
-    await prisma.verificationCode.deleteMany();
+    await prisma.loginTicket.deleteMany();
+    await prisma.externalIdentity.deleteMany();
     await prisma.user.deleteMany();
   });
 

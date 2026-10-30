@@ -1,9 +1,3 @@
-export interface LoginCodeMail {
-  readonly to: string;
-  readonly code: string;
-  readonly expiresAt: Date;
-}
-
 /**
  * A rendered transactional message.
  *
@@ -20,11 +14,9 @@ export interface OutboundMail {
 /**
  * Outbound mail port.
  *
- * The verification module and the notification module depend on this
- * abstraction only, so swapping the transport (log, SMTP, a provider API)
- * never touches the login flow or the message templates.
+ * The notification module depends on this abstraction only, so swapping the
+ * transport (log, SMTP, a provider API) never touches the message templates.
  */
 export abstract class Mailer {
-  abstract sendLoginCode(mail: LoginCodeMail): Promise<void>;
   abstract sendMail(mail: OutboundMail): Promise<void>;
 }

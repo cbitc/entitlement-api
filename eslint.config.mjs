@@ -32,7 +32,6 @@ export default tseslint.config(
       'src/infra/payments/alipay.gateway.ts',
       'src/scheduling/job-lock.service.ts',
       'src/health/health.controller.ts',
-      'src/infra/mail/smtp.mailer.ts',
     ],
     rules: {
       'no-restricted-syntax': [

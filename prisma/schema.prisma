@@ -14,28 +14,30 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// Who an account belongs to: the email is the identity, and possession of it
-/// is proven by a verification code at login. The row is created on the first
-/// successful login, so `emailVerifiedAt` is always set from the start.
+/// Who an account belongs to. The address is how people recognise themselves
+/// in the product, but it is not the identity: an SSO subject is. Possession
+/// of the address is proven by the IdP before the row is created.
 ///
 /// The role lives here rather than in deployment configuration so that
 /// administrator privileges are an auditable property of a real user.
 model User {
-  id               String               @id @default(cuid())
-  email            String               @unique @db.VarChar(254)
-  displayName      String?              @db.VarChar(120)
-  role             UserRole             @default(CUSTOMER)
-  status           UserStatus           @default(ACTIVE)
-  emailVerifiedAt  DateTime?            @db.DateTime(3)
-  lastLoginAt      DateTime?            @db.DateTime(3)
-  createdAt        DateTime             @default(now()) @db.DateTime(3)
-  updatedAt        DateTime             @updatedAt @db.DateTime(3)
-  subscriptions    Subscription[]
-  trialRedemptions TrialRedemption[]
-  requestedChanges SubscriptionChange[]
-  orders           Order[]
-  refunds          Refund[]
-  notifications    OutboundNotification[]
+  id                 String                 @id @default(cuid())
+  email              String                 @unique @db.VarChar(254)
+  displayName        String?                @db.VarChar(120)
+  role               UserRole               @default(CUSTOMER)
+  status             UserStatus             @default(ACTIVE)
+  emailVerifiedAt    DateTime?              @db.DateTime(3)
+  lastLoginAt        DateTime?              @db.DateTime(3)
+  createdAt          DateTime               @default(now()) @db.DateTime(3)
+  updatedAt          DateTime               @updatedAt @db.DateTime(3)
+  subscriptions      Subscription[]
+  trialRedemptions   TrialRedemption[]
+  requestedChanges   SubscriptionChange[]
+  orders             Order[]
+  refunds            Refund[]
+  notifications      OutboundNotification[]
+  externalIdentities ExternalIdentity[]
+  loginTickets       LoginTicket[]
 
   @@index([status])
 }
@@ -51,24 +53,40 @@ enum UserStatus {
   DISABLED
 }
 
-/// A short-lived login code sent to a mailbox.
+/// Links a local account to an identity at an external provider.
 ///
-/// Deliberately independent of `User`: the code proves control of the address
-/// before any account exists, so a first-time sign-in needs no user row yet.
-/// `codeHash` is an HMAC of the code and its recipient, never the code itself.
-/// Only the newest unconsumed row per address can be redeemed, and
-/// `attemptsRemaining` bounds guessing.
-model VerificationCode {
-  id                String    @id @default(cuid())
-  email             String    @db.VarChar(254)
-  codeHash          String    @db.VarChar(64)
-  expiresAt         DateTime  @db.DateTime(3)
-  attemptsRemaining Int       @default(5)
-  consumedAt        DateTime? @db.DateTime(3)
-  createdAt         DateTime  @default(now()) @db.DateTime(3)
+/// `(provider, subject)` is the stable key the IdP vouches for; the address is
+/// kept only as an audit trail of what the IdP claimed when the link was made.
+/// A separate row (rather than a column on `User`) keeps the door open for a
+/// second provider without rewriting the account table.
+model ExternalIdentity {
+  id          String    @id @default(cuid())
+  userId      String
+  provider    String    @db.VarChar(64)
+  subject     String    @db.VarChar(255)
+  email       String?   @db.VarChar(254)
+  linkedAt    DateTime  @default(now()) @db.DateTime(3)
+  lastLoginAt DateTime? @db.DateTime(3)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([email, consumedAt])
-  @@index([email, createdAt])
+  @@unique([provider, subject])
+  @@index([userId])
+}
+
+/// A single-use ticket that trades a completed SSO callback for a session
+/// token. It keeps the session token out of redirect URLs, browser history and
+/// access logs.
+model LoginTicket {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique @db.VarChar(64)
+  expiresAt  DateTime  @db.DateTime(3)
+  consumedAt DateTime? @db.DateTime(3)
+  createdAt  DateTime  @default(now()) @db.DateTime(3)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
 }
 
 /// A sellable product. Descriptive metadata only: pricing and features live
@@ -677,24 +695,24 @@ enum OutboundNotificationStatus {
 /// sends them, and retries with backoff. `dedupeKey` makes a replayed callback
 /// or a retried job enqueue at most one message.
 model OutboundNotification {
-  id            String                      @id @default(cuid())
+  id            String                     @id @default(cuid())
   userId        String?
-  user          User?                       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user          User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
   /// Recipient snapshot: the address that was valid when the event happened.
-  email         String                      @db.VarChar(254)
+  email         String                     @db.VarChar(254)
   type          NotificationType
-  status        OutboundNotificationStatus  @default(PENDING)
-  subject       String                      @db.VarChar(200)
+  status        OutboundNotificationStatus @default(PENDING)
+  subject       String                     @db.VarChar(200)
   payload       Json
-  dedupeKey     String?                     @unique @db.VarChar(191)
-  attempts      Int                         @default(0)
+  dedupeKey     String?                    @unique @db.VarChar(191)
+  attempts      Int                        @default(0)
   /// When the next attempt is due; NULL means "as soon as possible".
-  nextAttemptAt DateTime?                   @db.DateTime(3)
-  claimedAt     DateTime?                   @db.DateTime(3)
-  sentAt        DateTime?                   @db.DateTime(3)
-  lastError     String?                     @db.VarChar(255)
-  createdAt     DateTime                    @default(now()) @db.DateTime(3)
-  updatedAt     DateTime                    @updatedAt @db.DateTime(3)
+  nextAttemptAt DateTime?                  @db.DateTime(3)
+  claimedAt     DateTime?                  @db.DateTime(3)
+  sentAt        DateTime?                  @db.DateTime(3)
+  lastError     String?                    @db.VarChar(255)
+  createdAt     DateTime                   @default(now()) @db.DateTime(3)
+  updatedAt     DateTime                   @updatedAt @db.DateTime(3)
 
   @@index([status, nextAttemptAt])
   @@index([userId, createdAt])
